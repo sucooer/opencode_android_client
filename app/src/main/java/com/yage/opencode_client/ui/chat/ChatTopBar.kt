@@ -274,7 +274,7 @@ internal fun ChatTopBar(
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text(
                                                     model.displayName,
-                                                    color = if (globalIndex == state.selectedModelIndex)
+                                                    color = if (index == state.selectedModelIndex)
                                                         MaterialTheme.colorScheme.primary
                                                     else
                                                         MaterialTheme.colorScheme.onSurface,
@@ -283,7 +283,7 @@ internal fun ChatTopBar(
                                             }
                                         },
                                         onClick = {
-                                            actions.onSelectModel(globalIndex)
+                                            actions.onSelectModel(index)
                                             showModelMenu = false
                                         }
                                     )
