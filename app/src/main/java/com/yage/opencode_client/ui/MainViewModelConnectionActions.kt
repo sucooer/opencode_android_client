@@ -25,17 +25,13 @@ internal fun applySavedSettings(
     )
 
     val savedModelIndex = settingsManager.selectedModelIndex
-    val clampedModelIndex = savedModelIndex.coerceIn(0, ModelPresets.list.size - 1)
-    if (clampedModelIndex != savedModelIndex) {
-        settingsManager.selectedModelIndex = clampedModelIndex
-    }
 
     state.update {
         it.copy(
             currentSessionId = settingsManager.currentSessionId,
             hostProfiles = hostProfileStore.profiles(),
             currentHostProfileId = currentProfile.id,
-            selectedModelIndex = clampedModelIndex,
+            selectedModelIndex = savedModelIndex,
             selectedAgentName = settingsManager.selectedAgentName ?: "build",
             themeMode = settingsManager.themeMode,
             languageMode = settingsManager.languageMode
