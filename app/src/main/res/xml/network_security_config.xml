@@ -1,20 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Cleartext HTTP is permitted ONLY for localhost and Tailscale MagicDNS (*.ts.net).
-    All other traffic requires HTTPS.
-    Note: Android does not support IP range matching; LAN IPs (e.g. 192.168.x.x)
-    require HTTPS or use Tailscale to get a *.ts.net hostname.
+    Cleartext HTTP is permitted for all domains.
+    Modified to allow direct IP connection (e.g. 186.x.x.x).
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <domain includeSubdomains="true">ts.net</domain>
-    </domain-config>
 </network-security-config>

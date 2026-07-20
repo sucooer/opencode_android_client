@@ -123,6 +123,10 @@ data class AppState(
                 "Gemini" in displayName -> "Gemini"
                 "GPT" in displayName -> "GPT"
                 "Grok" in displayName -> "Grok"
+                "deepseek" in modelId.lowercase() -> "DS"
+                "glm" in modelId.lowercase() -> "GLM"
+                "qwen" in modelId.lowercase() -> "Qwen"
+                displayName.length > 12 -> displayName.split(" ").firstOrNull()?.take(8) ?: displayName.take(12)
                 else -> displayName.split(" ").firstOrNull() ?: displayName
             }
     }
@@ -296,9 +300,20 @@ data class AppState(
     val visibleAgents: List<AgentInfo>
         get() = agents.filter { it.isVisible }
 
-    /** Curated model list (filtered like iOS), not the full API response. */
+    /** Dynamic model list from server providers API, fallback to presets. */
     val availableModels: List<ModelOption>
-        get() = ModelPresets.list
+        get() {
+            val fromProviders = providers?.providers?.flatMap { provider ->
+                provider.models.map { (modelKey, model) ->
+                    ModelOption(
+                        displayName = model.name ?: modelKey,
+                        providerId = provider.id,
+                        modelId = modelKey
+                    )
+                }
+            }?.takeIf { it.isNotEmpty() }
+            return fromProviders ?: ModelPresets.list
+        }
 
     val selectedAIUsageQuota: AIUsageQuota?
         get() {
