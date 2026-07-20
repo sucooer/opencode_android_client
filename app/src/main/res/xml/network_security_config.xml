@@ -4,7 +4,7 @@
     Modified to allow direct IP connection (e.g. 186.x.x.x).
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
