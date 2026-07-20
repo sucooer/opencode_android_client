@@ -259,7 +259,7 @@ internal fun ChatTopBar(
                                             providerName,
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.outline,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     },
                                     onClick = { },
