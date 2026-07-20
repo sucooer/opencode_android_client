@@ -110,7 +110,7 @@ data class AppState(
     val aiUsageError: String? = null
 ) {
     data class NfcPendingAction(val prompt: String, val autoSend: Boolean)
-    data class ModelOption(val displayName: String, val providerId: String, val modelId: String) {
+    data class ModelOption(val displayName: String, val providerId: String, val providerName: String = "", val modelId: String) {
         val shortName: String
             get() = when {
                 displayName == "DeepSeek V4 Flash" -> "DS-Flash"
@@ -308,6 +308,7 @@ data class AppState(
                     ModelOption(
                         displayName = model.name ?: modelKey,
                         providerId = provider.id,
+                        providerName = provider.name ?: provider.id,
                         modelId = modelKey
                     )
                 }

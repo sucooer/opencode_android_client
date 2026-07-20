@@ -174,11 +174,20 @@ class AppStateTest {
     }
 
     @Test
-    fun `availableModels independent of providers`() {
-        val stateWithProviders = AppState(providers = makeProviders(Triple("openai", "gpt-4", "GPT-4")))
-        val stateWithoutProviders = AppState(providers = null)
-        assertEquals(stateWithProviders.availableModels, stateWithoutProviders.availableModels)
-        assertEquals(ModelPresets.list, stateWithProviders.availableModels)
+    fun `availableModels falls back to presets when providers is null`() {
+        val state = AppState(providers = null)
+        assertEquals(ModelPresets.list, state.availableModels)
+    }
+
+    @Test
+    fun `availableModels uses providers data when available`() {
+        val state = AppState(providers = makeProviders(Triple("openai", "gpt-4", "GPT-4")))
+        val models = state.availableModels
+        assertEquals(1, models.size)
+        assertEquals("GPT-4", models[0].displayName)
+        assertEquals("openai", models[0].providerId)
+        assertEquals("openai", models[0].providerName)
+        assertEquals("gpt-4", models[0].modelId)
     }
 
     private fun makeContextUsageState(
