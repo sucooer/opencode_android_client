@@ -251,6 +251,7 @@ internal fun ChatTopBar(
                             val grouped = state.availableModels.groupBy {
                                 it.providerName.ifEmpty { it.providerId }
                             }
+                            var flatIndex = 0
                             grouped.forEach { (providerName, models) ->
                                 // Provider section header
                                 DropdownMenuItem(
@@ -266,7 +267,8 @@ internal fun ChatTopBar(
                                     enabled = false
                                 )
                                 models.forEach { model ->
-                                    val globalIndex = state.availableModels.indexOf(model)
+                                    val index = flatIndex
+                                    flatIndex++
                                     DropdownMenuItem(
                                         text = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
