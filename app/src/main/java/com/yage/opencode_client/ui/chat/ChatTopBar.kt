@@ -248,46 +248,43 @@ internal fun ChatTopBar(
                                     onClick = { }
                                 )
                             }
-                            val grouped = state.availableModels.groupBy {
-                                it.providerName.ifEmpty { it.providerId }
-                            }
-                            var flatIndex = 0
-                            grouped.forEach { (providerName, models) ->
-                                // Provider section header
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            providerName,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    },
-                                    onClick = { },
-                                    enabled = false
-                                )
-                                models.forEach { model ->
-                                    val index = flatIndex
-                                    flatIndex++
+                            var lastProvider = ""
+                            state.availableModels.forEachIndexed { index, model ->
+                                val provider = model.providerName.ifEmpty { model.providerId }
+                                if (provider != lastProvider) {
+                                    // Provider section header
                                     DropdownMenuItem(
                                         text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    model.displayName,
-                                                    color = if (index == state.selectedModelIndex)
-                                                        MaterialTheme.colorScheme.primary
-                                                    else
-                                                        MaterialTheme.colorScheme.onSurface,
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                            }
+                                            Text(
+                                                provider,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
                                         },
-                                        onClick = {
-                                            actions.onSelectModel(index)
-                                            showModelMenu = false
-                                        }
+                                        onClick = { },
+                                        enabled = false
                                     )
+                                    lastProvider = provider
                                 }
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                model.displayName,
+                                                color = if (index == state.selectedModelIndex)
+                                                    MaterialTheme.colorScheme.primary
+                                                else
+                                                    MaterialTheme.colorScheme.onSurface,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        actions.onSelectModel(index)
+                                        showModelMenu = false
+                                    }
+                                )
                             }
                         }
                     }

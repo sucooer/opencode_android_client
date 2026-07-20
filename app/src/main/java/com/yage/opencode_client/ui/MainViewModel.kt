@@ -1279,7 +1279,8 @@ class MainViewModel @Inject constructor(
     }
 
     fun selectModel(index: Int) {
-        val clamped = index.coerceIn(0, ModelPresets.list.size - 1)
+        val availableSize = _state.value.availableModels.size
+        val clamped = index.coerceIn(0, availableSize - 1)
         settingsManager.selectedModelIndex = clamped
         _state.update { it.copy(selectedModelIndex = clamped) }
         _state.value.currentSessionId?.let { settingsManager.setModelForSession(it, clamped) }
