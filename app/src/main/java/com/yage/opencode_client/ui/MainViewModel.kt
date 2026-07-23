@@ -291,6 +291,9 @@ data class AppState(
     val currentSessionStatus: SessionStatus?
         get() = currentSessionId?.let { sessionStatuses[it] }
 
+    val attentionSessionIds: List<String>
+        get() = pendingPermissions.map { it.sessionId } + pendingQuestions.map { it.sessionId }
+
     val isCurrentSessionBusy: Boolean
         get() = currentSessionStatus?.isBusy == true
 
@@ -892,6 +895,7 @@ class MainViewModel @Inject constructor(
         loadSessions()
         loadAgents()
         loadProviders()
+        loadPendingPermissions()
         loadPendingQuestions()
     }
 
@@ -1122,6 +1126,7 @@ class MainViewModel @Inject constructor(
 
     fun sendMessage() {
         val sessionId = _state.value.currentSessionId ?: return
+        if (_state.value.isRecording) return
         if (_state.value.sendingSessionIds.contains(sessionId)) return
         val text = _state.value.inputText.trim()
         val attachments = _state.value.imageAttachments
