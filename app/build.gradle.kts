@@ -28,8 +28,8 @@ android {
         applicationId = "com.yage.opencode_client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "0.1.20260715"
+        versionCode = 17
+        versionName = "0.1.20260731"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)
@@ -86,10 +86,7 @@ dependencies {
     
     // VoiceFlowKit: realtime speech transcription pipeline, consumed remotely from
     // grapeot/voiceflow-android via JitPack (com.github.<user>:<repo>:<tag>).
-    // Dual-strategy VoiceFlowKit. Prefer exact SemVer after voiceflow-android
-    // merges/tags 0.3.0; until then pin the dual-strategy PR commit (full SHA;
-    // short hashes can cold-start JitPack past CI timeouts).
-    implementation("com.github.grapeot:voiceflow-android:0fbc2d5cdeeb2335671726044f7fb105314671f1")
+    implementation("com.github.grapeot:voiceflow-android:0.4.0")
 
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
