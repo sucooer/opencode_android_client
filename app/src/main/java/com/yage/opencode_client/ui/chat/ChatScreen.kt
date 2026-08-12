@@ -267,6 +267,29 @@ fun ChatScreen(
             }
         }
 
+        state.pendingPermissions
+            .filter { it.sessionId == state.currentSessionId }
+            .firstOrNull()
+            ?.let { permission ->
+                ChatPermissionCard(
+                    permission = permission,
+                    onRespond = { response ->
+                        viewModel.respondPermission(permission.sessionId, permission.id, response)
+                    }
+                )
+            }
+
+        state.pendingQuestions
+            .filter { it.sessionId == state.currentSessionId }
+            .firstOrNull()
+            ?.let { question ->
+                QuestionCardView(
+                    question = question,
+                    onReply = { answers, onError -> viewModel.replyQuestion(question.id, answers, onError) },
+                    onReject = { viewModel.rejectQuestion(question.id) }
+                )
+            }
+
         if (state.currentSessionId != null) {
             ChatInputBar(
                 text = state.inputText,
@@ -318,29 +341,6 @@ fun ChatScreen(
                 }
             )
         }
-
-        state.pendingPermissions
-            .filter { it.sessionId == state.currentSessionId }
-            .firstOrNull()
-            ?.let { permission ->
-            ChatPermissionCard(
-                permission = permission,
-                onRespond = { response ->
-                    viewModel.respondPermission(permission.sessionId, permission.id, response)
-                }
-            )
-        }
-
-        state.pendingQuestions
-            .filter { it.sessionId == state.currentSessionId }
-            .firstOrNull()
-            ?.let { question ->
-                QuestionCardView(
-                    question = question,
-                    onReply = { answers, onError -> viewModel.replyQuestion(question.id, answers, onError) },
-                    onReject = { viewModel.rejectQuestion(question.id) }
-                )
-            }
     }
 }
 
