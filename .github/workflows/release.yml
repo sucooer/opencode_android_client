@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      versionName:
+        description: 'Semver version (e.g., 1.0.0). Leave empty to use tag.'
+        required: false
+        type: string
+        default: ''
+      versionCode:
+        description: 'Android versionCode. Leave empty to read from build.gradle.kts.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -37,18 +49,30 @@ jobs:
             exit 1
           fi
 
-      # Tag format: v<versionName>-<versionCode>, e.g. v0.1.20260812-18
+      # Tag format: v<major.minor.patch>, e.g. v1.0.0
       - name: Parse version from tag
         id: version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          NAME="${TAG%-*}"
-          CODE="${TAG##*-}"
-          if [[ -z "$NAME" || ! "$CODE" =~ ^[0-9]+$ ]]; then
-            echo "::error::Tag must look like v<versionName>-<versionCode>, got $GITHUB_REF_NAME"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            NAME="${{ inputs.versionName }}"
+            CODE="${{ inputs.versionCode }}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+            NAME="$TAG"
+            CODE=""
+          fi
+          if [[ -z "$NAME" ]]; then
+            echo "::error::versionName is required. For tag push, use v<major.minor.patch>; for workflow_dispatch, provide versionName input."
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ -z "$CODE" ]]; then
+            CODE=$(grep -oP 'versionCode\s*=\s*ciVersionCode\s*\?\s*:\s*\K\d+' app/build.gradle.kts || true)
+          fi
+          if [[ -z "$CODE" || ! "$CODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::versionCode could not be determined from tag or build.gradle.kts"
+            exit 1
+          fi
+          echo "tag=$NAME" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
 
