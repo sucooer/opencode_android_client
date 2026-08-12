@@ -14,6 +14,15 @@ val env = if (envFile.exists()) {
 val ciVersionCode: Int? = System.getenv("CI_VERSION_CODE")?.toIntOrNull()
 val ciVersionName: String? = System.getenv("CI_VERSION_NAME")?.takeIf { it.isNotBlank() }
 
+val keystoreBase64: String? = System.getenv("KEYSTORE_BASE64")
+val keystorePassword: String? = System.getenv("KEYSTORE_PASSWORD")
+val keyAlias: String? = System.getenv("KEY_ALIAS")
+val keyPassword: String? = System.getenv("KEY_PASSWORD")
+val hasSigning = !keystoreBase64.isNullOrBlank() &&
+    !keystorePassword.isNullOrBlank() &&
+    !keyAlias.isNullOrBlank() &&
+    !keyPassword.isNullOrBlank()
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -26,6 +35,20 @@ plugins {
 android {
     namespace = "com.yage.opencode_client"
     compileSdk = 35
+
+    signingConfigs {
+        if (hasSigning) {
+            create("release") {
+                storeFile = file("build/release-keystore.jks").apply {
+                    parentFile.mkdirs()
+                    writeBytes(Base64.getDecoder().decode(keystoreBase64!!))
+                }
+                storePassword = keystorePassword!!
+                keyAlias = keyAlias!!
+                keyPassword = keyPassword!!
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "com.yage.opencode_client"
@@ -58,6 +81,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {
