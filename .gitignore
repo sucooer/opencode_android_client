@@ -33,6 +33,9 @@ secrets.properties
 google-services.json
 .env
 
+# OpenCode
+.omo/
+
 # IDE
 *.iml
 .idea/
