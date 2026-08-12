@@ -11,6 +11,9 @@ val env = if (envFile.exists()) {
         }
 } else emptyMap()
 
+val ciVersionCode: Int? = System.getenv("CI_VERSION_CODE")?.toIntOrNull()
+val ciVersionName: String? = System.getenv("CI_VERSION_NAME")?.takeIf { it.isNotBlank() }
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -28,8 +31,8 @@ android {
         applicationId = "com.yage.opencode_client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "0.1.20260731"
+        versionCode = ciVersionCode ?: 17
+        versionName = ciVersionName ?: "0.1.20260731"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)

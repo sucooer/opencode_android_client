@@ -27,6 +27,14 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # Compute a monotonically increasing version from the build timestamp so
+      # every CI artifact can overwrite-install over the previous one.
+      - name: Compute version from timestamp
+        id: version
+        run: |
+          echo "code=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "name=0.1.$(date +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+
       # Release 签名（需要在 GitHub Secrets 中配置）
       - name: Decode keystore
         if: ${{ env.KEYSTORE_BASE64 != '' }}
@@ -42,6 +50,8 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          CI_VERSION_CODE: ${{ steps.version.outputs.code }}
+          CI_VERSION_NAME: ${{ steps.version.outputs.name }}
         run: |
           ./gradlew assembleRelease \
             -Pandroid.injected.signing.store.file=app/release-keystore.jks \
@@ -53,6 +63,8 @@ jobs:
         if: ${{ env.KEYSTORE_BASE64 == '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          CI_VERSION_CODE: ${{ steps.version.outputs.code }}
+          CI_VERSION_NAME: ${{ steps.version.outputs.name }}
         run: |
           echo "⚠️ No signing secrets found, building debug APK (signed with debug keystore)"
           ./gradlew assembleDebug
