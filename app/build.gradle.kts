@@ -16,12 +16,12 @@ val ciVersionName: String? = System.getenv("CI_VERSION_NAME")?.takeIf { it.isNot
 
 val keystoreBase64: String? = System.getenv("KEYSTORE_BASE64")
 val keystorePassword: String? = System.getenv("KEYSTORE_PASSWORD")
-val keyAlias: String? = System.getenv("KEY_ALIAS")
-val keyPassword: String? = System.getenv("KEY_PASSWORD")
+val keystoreKeyAlias: String? = System.getenv("KEY_ALIAS")
+val keystoreKeyPassword: String? = System.getenv("KEY_PASSWORD")
 val hasSigning = !keystoreBase64.isNullOrBlank() &&
     !keystorePassword.isNullOrBlank() &&
-    !keyAlias.isNullOrBlank() &&
-    !keyPassword.isNullOrBlank()
+    !keystoreKeyAlias.isNullOrBlank() &&
+    !keystoreKeyPassword.isNullOrBlank()
 
 plugins {
     alias(libs.plugins.android.application)
@@ -44,8 +44,8 @@ android {
                     writeBytes(Base64.getDecoder().decode(keystoreBase64!!))
                 }
                 storePassword = keystorePassword!!
-                keyAlias = keyAlias!!
-                keyPassword = keyPassword!!
+                keyAlias = keystoreKeyAlias!!
+                keyPassword = keystoreKeyPassword!!
             }
         }
     }
