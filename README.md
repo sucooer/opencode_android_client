@@ -76,6 +76,10 @@ export PATH="$JAVA_HOME/bin:$PATH"
 ./gradlew connectedDebugAndroidTest
 ```
 
+## 发版与签名
+
+详见 [docs/RELEASING.md](docs/RELEASING.md)。
+
 ## 项目结构
 
 ```
