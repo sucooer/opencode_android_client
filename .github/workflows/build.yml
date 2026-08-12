@@ -36,7 +36,7 @@ jobs:
           echo "name=0.1.$(date +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
 
       - name: Build Release APK (signed)
-        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -47,7 +47,7 @@ jobs:
         run: ./gradlew assembleRelease
 
       - name: Build Debug APK (fallback)
-        if: ${{ env.KEYSTORE_BASE64 == '' }}
+        if: ${{ secrets.KEYSTORE_BASE64 == '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           CI_VERSION_CODE: ${{ steps.version.outputs.code }}
@@ -57,7 +57,7 @@ jobs:
           ./gradlew assembleDebug
 
       - name: Upload Release APK
-        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: release-apk
@@ -65,7 +65,7 @@ jobs:
           retention-days: 30
 
       - name: Upload Debug APK
-        if: ${{ env.KEYSTORE_BASE64 == '' }}
+        if: ${{ secrets.KEYSTORE_BASE64 == '' }}
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
