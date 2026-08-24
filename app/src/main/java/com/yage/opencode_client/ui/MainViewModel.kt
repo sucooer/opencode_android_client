@@ -130,6 +130,7 @@ data class AppState(
                 "deepseek" in modelId.lowercase() -> "DS"
                 "glm" in modelId.lowercase() -> "GLM"
                 "qwen" in modelId.lowercase() -> "Qwen"
+                "Qwen" in displayName -> "Qwen"
                 displayName.length > 12 -> displayName.split(" ").firstOrNull()?.take(8) ?: displayName.take(12)
                 else -> displayName.split(" ").firstOrNull() ?: displayName
             }
