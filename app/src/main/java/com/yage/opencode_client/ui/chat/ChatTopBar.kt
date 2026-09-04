@@ -98,6 +98,7 @@ internal data class ChatTopBarActions(
     val onRefreshSessions: () -> Unit = {},
     val onToggleSessionExpanded: (String) -> Unit = {},
     val onSelectModel: (Int) -> Unit,
+    val onManageModels: () -> Unit = {},
     val onOpenAIUsage: () -> Unit = {},
     val onRefreshAIUsage: () -> Unit = {},
     val onNavigateToSettings: () -> Unit = {},
@@ -249,35 +250,22 @@ internal fun ChatTopBar(
                                     onClick = { }
                                 )
                             }
-                            var lastProvider = ""
                             state.availableModels.forEachIndexed { index, model ->
-                                val provider = model.providerName.ifEmpty { model.providerId }
-                                if (provider != lastProvider) {
-                                    // Provider section header
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                provider,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        },
-                                        onClick = { },
-                                        enabled = false
-                                    )
-                                    lastProvider = provider
-                                }
                                 DropdownMenuItem(
                                     text = {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Column {
                                             Text(
                                                 model.displayName,
+                                                style = MaterialTheme.typography.bodyLarge,
                                                 color = if (index == state.selectedModelIndex)
                                                     MaterialTheme.colorScheme.primary
                                                 else
-                                                    MaterialTheme.colorScheme.onSurface,
-                                                modifier = Modifier.weight(1f)
+                                                    MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                model.modelId,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
                                     },
@@ -287,6 +275,15 @@ internal fun ChatTopBar(
                                     }
                                 )
                             }
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.model_shortlist_manage)) },
+                                onClick = {
+                                    actions.onManageModels()
+                                    showModelMenu = false
+                                },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) }
+                            )
                         }
                     }
 

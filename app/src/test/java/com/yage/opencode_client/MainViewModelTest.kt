@@ -14,6 +14,10 @@ import com.yage.opencode_client.data.model.SSEPayload
 import com.yage.opencode_client.data.model.HealthResponse
 import com.yage.opencode_client.data.model.HostProfile
 import com.yage.opencode_client.data.model.HostTransport
+import com.yage.opencode_client.data.model.ConfigProvider
+import com.yage.opencode_client.data.model.ModelShortlistItem
+import com.yage.opencode_client.data.model.ProviderRegistryResponse
+import com.yage.opencode_client.data.model.ProvidersResponse
 import com.yage.opencode_client.data.repository.HostProfileStore
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.ssh.SSHKeyManager
@@ -22,6 +26,8 @@ import com.yage.opencode_client.ui.AppState
 import com.yage.opencode_client.ui.DeepLinkError
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.ModelPresets
+import com.yage.opencode_client.ui.encodeShortlist
+import com.yage.opencode_client.ui.seedShortlistFromPresets
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
 import com.yage.opencode_client.util.ThemeMode
@@ -61,6 +67,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -135,8 +142,8 @@ class MainViewModelTest {
 
         every { settingsManager.getDraftText(any()) } returns ""
         every { settingsManager.setDraftText(any(), any()) } just runs
-        every { settingsManager.getModelForSession(any()) } returns null
-        every { settingsManager.setModelForSession(any(), any()) } just runs
+        every { settingsManager.getModelIdForSession(any()) } returns null
+        every { settingsManager.getLegacySessionModels() } returns emptyMap()
         every { settingsManager.getAgentForSession(any()) } returns null
         every { settingsManager.setAgentForSession(any(), any()) } just runs
 
@@ -145,6 +152,8 @@ class MainViewModelTest {
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
+        coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())
+        coEvery { repository.getProviderRegistry() } returns Result.success(ProviderRegistryResponse())
     }
 
     private fun createViewModel(): MainViewModel {
@@ -351,13 +360,13 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `init clamps saved model index and configures repository`() = runTest {
+    fun `init seeds model shortlist and configures repository`() = runTest {
         every { settingsManager.selectedModelIndex } returns 999
 
         val viewModel = createViewModel()
 
-        assertEquals(ModelPresets.list.lastIndex, viewModel.state.value.selectedModelIndex)
-        verify { settingsManager.selectedModelIndex = ModelPresets.list.lastIndex }
+        assertEquals(seedShortlistFromPresets().size, viewModel.state.value.modelShortlist.size)
+        assertTrue(viewModel.state.value.selectedModelIndex in viewModel.state.value.modelShortlist.indices)
         verify { repository.configure("http://server.test", null, null) }
     }
 
@@ -376,7 +385,7 @@ class MainViewModelTest {
 
     @Test
     fun `sendMessage success clears input and uses selected preset model`() = runTest {
-        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(400) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
         )
@@ -397,7 +406,9 @@ class MainViewModelTest {
                 "session-1",
                 "hello world",
                 "review",
-                Message.ModelInfo(selected.providerId, selected.modelId)
+                Message.ModelInfo(selected.providerId, selected.modelId),
+                any(),
+                any()
             )
         }
         assertEquals("", viewModel.state.value.inputText)
@@ -406,7 +417,7 @@ class MainViewModelTest {
 
     @Test
     fun `sendMessage ignores duplicate sends while request is in flight`() = runTest {
-        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } coAnswers {
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } coAnswers {
             delay(100)
             Result.success(Unit)
         }
@@ -421,13 +432,13 @@ class MainViewModelTest {
 
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.sendMessage(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) { repository.sendMessage(any(), any(), any(), any(), any(), any()) }
         assertFalse(viewModel.state.value.sendingSessionIds.contains("session-1"))
     }
 
     @Test
     fun `sendMessage success refreshes sessions`() = runTest {
-        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(400) } returns Result.success(
             listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project", title = "Updated"))
         )
@@ -458,7 +469,7 @@ class MainViewModelTest {
             title = "Previous Top",
             time = com.yage.opencode_client.data.model.Session.TimeInfo(updated = 2_000)
         )
-        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(400) } returns Result.success(listOf(previousTop, current))
 
         val viewModel = createViewModel()
@@ -478,7 +489,7 @@ class MainViewModelTest {
 
     @Test
     fun `sendMessage failure keeps input and exposes error`() = runTest {
-        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.failure(IllegalStateException("send failed"))
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns Result.failure(IllegalStateException("send failed"))
 
         val viewModel = createViewModel()
         viewModel.selectSession("session-1")
@@ -494,7 +505,7 @@ class MainViewModelTest {
 
     @Test
     fun `sendMessage still queues prompt when current session is busy`() = runTest {
-        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns Result.success(Unit)
 
         val viewModel = createViewModel()
         viewModel.selectSession("session-1")
@@ -513,6 +524,8 @@ class MainViewModelTest {
             repository.sendMessage(
                 "session-1",
                 "queue this next",
+                any(),
+                any(),
                 any(),
                 any()
             )
@@ -534,8 +547,230 @@ class MainViewModelTest {
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any(), any(), any()) }
         assertEquals("do not send yet", viewModel.state.value.inputText)
+    }
+
+    @Test
+    fun `sendMessage inserts optimistic user row and clears input immediately`() = runTest {
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } coAnswers {
+            delay(100)
+            Result.success(Unit)
+        }
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        viewModel.sendMessage()
+
+        // The optimistic row is inserted synchronously, before the network call resolves.
+        val state = viewModel.state.value
+        assertEquals("", state.inputText)
+        assertTrue(state.sendingSessionIds.contains("session-1"))
+        val optimistic = state.messages.lastOrNull()
+        assertNotNull(optimistic)
+        assertEquals("user", optimistic!!.info.role)
+        assertEquals("hello", optimistic.parts.first { it.isText }.text)
+        assertTrue(state.pendingOptimisticMessageIds.contains(optimistic.info.id))
+    }
+
+    @Test
+    fun `sendMessage failure removes optimistic row and restores input`() = runTest {
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns
+                Result.failure(IllegalStateException("send failed"))
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        viewModel.sendMessage()
+        // Optimistic row is present immediately after the send is dispatched.
+        assertTrue(viewModel.state.value.messages.isNotEmpty())
+        advanceUntilIdle()
+
+        // After the failure, the optimistic row is dropped and the input restored.
+        val state = viewModel.state.value
+        assertEquals("hello", state.inputText)
+        assertEquals("send failed", state.error)
+        assertTrue(state.messages.isEmpty())
+        assertTrue(state.pendingOptimisticMessageIds.isEmpty())
+    }
+
+    @Test
+    fun `sendMessage success keeps optimistic row until server confirms it`() = runTest {
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
+        coEvery { repository.getSessions(400) } returns Result.success(
+            listOf(com.yage.opencode_client.data.model.Session(id = "session-1", directory = "/tmp/project"))
+        )
+
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        // The server has not echoed the message yet, so the optimistic row stays visible.
+        val state = viewModel.state.value
+        val optimistic = state.messages.lastOrNull()
+        assertNotNull(optimistic)
+        assertEquals("user", optimistic!!.info.role)
+        assertTrue(state.pendingOptimisticMessageIds.contains(optimistic.info.id))
+    }
+
+    @Test
+    fun `sendMessage failure does not clobber another session draft after switching`() = runTest {
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } coAnswers {
+            delay(100)
+            Result.failure(IllegalStateException("send failed"))
+        }
+        every { settingsManager.getDraftText("session-2") } returns "session-2 draft"
+
+        val viewModel = createViewModel()
+        viewModel.selectSession("session-1")
+        advanceUntilIdle()
+        viewModel.setInputText("hello")
+
+        viewModel.sendMessage()
+        // Switch to another session while session-1's send is still in flight.
+        viewModel.selectSession("session-2")
+        advanceUntilIdle()
+
+        // session-1's send failed, but session-2's draft must be preserved.
+        val state = viewModel.state.value
+        assertEquals("session-2", state.currentSessionId)
+        assertEquals("session-2 draft", state.inputText)
+        assertEquals("send failed", state.error)
+        assertTrue(state.pendingOptimisticMessageIds.isEmpty())
+    }
+
+    @Test
+    fun `session_error SSE removes pending optimistic row and recovers text`() = runTest {
+        coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                messages = listOf(
+                    MessageWithParts(
+                        info = Message(id = "msg_pending", sessionId = "session-1", role = "user"),
+                        parts = listOf(
+                            Part(id = "p1", messageId = "msg_pending", sessionId = "session-1", type = "text", text = "hello")
+                        )
+                    )
+                ),
+                pendingOptimisticMessageIds = setOf("msg_pending")
+            )
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "session.error",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-1"))
+                        put(
+                            "error",
+                            buildJsonObject {
+                                put("name", JsonPrimitive("ProviderAuthError"))
+                                put("data", buildJsonObject { put("message", JsonPrimitive("nope")) })
+                            }
+                        )
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertTrue(state.messages.isEmpty())
+        assertTrue(state.pendingOptimisticMessageIds.isEmpty())
+        assertEquals("hello", state.inputText)
+        assertEquals("Send failed: ProviderAuthError: nope", state.error)
+    }
+
+    @Test
+    fun `session_error SSE for another session is ignored`() = runTest {
+        coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                messages = listOf(
+                    MessageWithParts(
+                        info = Message(id = "msg_pending", sessionId = "session-1", role = "user"),
+                        parts = listOf(
+                            Part(id = "p1", messageId = "msg_pending", sessionId = "session-1", type = "text", text = "hello")
+                        )
+                    )
+                ),
+                pendingOptimisticMessageIds = setOf("msg_pending")
+            )
+        }
+
+        handleSse(
+            viewModel,
+            SSEEvent(
+                payload = SSEPayload(
+                    type = "session.error",
+                    properties = buildJsonObject {
+                        put("sessionID", JsonPrimitive("session-2"))
+                        put("error", buildJsonObject { put("name", JsonPrimitive("X")) })
+                    }
+                )
+            )
+        )
+        advanceUntilIdle()
+
+        // The error belongs to a different session, so the pending row is untouched.
+        assertEquals(1, viewModel.state.value.messages.size)
+        assertTrue(viewModel.state.value.pendingOptimisticMessageIds.contains("msg_pending"))
+        assertNull(viewModel.state.value.error)
+    }
+
+    @Test
+    fun `host switch clears pending optimistic message ids`() = runTest {
+        val first = HostProfile(
+            id = "host-1",
+            name = "First",
+            transport = HostTransport.DIRECT,
+            serverUrl = "http://first.test"
+        )
+        val second = HostProfile(
+            id = "host-2",
+            name = "Second",
+            transport = HostTransport.DIRECT,
+            serverUrl = "http://second.test"
+        )
+        var currentProfile = first
+        every { hostProfileStore.currentProfile() } answers { currentProfile }
+        every { hostProfileStore.profiles() } returns listOf(first, second)
+        every { hostProfileStore.select(second.id) } answers {
+            currentProfile = second
+            second
+        }
+        coEvery { repository.checkHealth() } returns Result.failure(IllegalStateException("offline"))
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                isConnected = true,
+                currentSessionId = "session-1",
+                messages = listOf(MessageWithParts(Message(id = "msg_pending", sessionId = "session-1", role = "user"))),
+                pendingOptimisticMessageIds = setOf("msg_pending")
+            )
+        }
+
+        viewModel.selectHostProfile(second.id)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.pendingOptimisticMessageIds.isEmpty())
+        assertNull(viewModel.state.value.currentSessionId)
+        assertTrue(viewModel.state.value.messages.isEmpty())
     }
 
     @Test
@@ -548,7 +783,7 @@ class MainViewModelTest {
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any(), any(), any()) }
         assertEquals("   ", viewModel.state.value.inputText)
     }
 
@@ -560,7 +795,7 @@ class MainViewModelTest {
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any(), any(), any()) }
         assertEquals("hello", viewModel.state.value.inputText)
     }
 
@@ -1806,13 +2041,89 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `selectModel with active session saves model index per session`() = runTest {
+    fun `selectModel with active session saves model id per session`() = runTest {
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "s1") }
 
         viewModel.selectModel(2)
 
-        verify { settingsManager.setModelForSession("s1", 2) }
+        val expectedId = seedShortlistFromPresets()[2].id
+        verify { settingsManager.setModelIdForSession("s1", expectedId) }
+    }
+
+    @Test
+    fun `moveModelShortlist reorders and persists`() = runTest {
+        val viewModel = createViewModel()
+        val before = viewModel.state.value.modelShortlist
+        assertTrue(before.size >= 2)
+
+        viewModel.moveModelShortlist(0, 1)
+
+        val after = viewModel.state.value.modelShortlist
+        assertEquals(before[1], after[0])
+        assertEquals(before[0], after[1])
+        verify { settingsManager.modelShortlistJson = any() }
+    }
+
+    @Test
+    fun `removeModelShortlistItem removes and reanchors selection`() = runTest {
+        val viewModel = createViewModel()
+        val before = viewModel.state.value.modelShortlist
+        val targetId = before[0].id
+
+        viewModel.removeModelShortlistItem(targetId)
+
+        val after = viewModel.state.value.modelShortlist
+        assertEquals(before.size - 1, after.size)
+        assertFalse(after.any { it.id == targetId })
+        assertTrue(viewModel.state.value.selectedModelIndex in after.indices)
+    }
+
+    @Test
+    fun `removeModelShortlistItem of current selection falls back and persists`() = runTest {
+        val viewModel = createViewModel()
+        val before = viewModel.state.value.modelShortlist
+        val targetId = before[0].id
+        // Make the first model the active selection on a live session.
+        updateState(viewModel) { it.copy(currentSessionId = "s1", selectedModelId = targetId, selectedModelIndex = 0) }
+
+        viewModel.removeModelShortlistItem(targetId)
+
+        val after = viewModel.state.value.modelShortlist
+        assertEquals(before.size - 1, after.size)
+        // Selection falls back to the new first item and is persisted globally and
+        // per-session, so a restart doesn't re-read the deleted id.
+        val fallbackId = after.first().id
+        assertEquals(fallbackId, viewModel.state.value.selectedModelId)
+        assertEquals(0, viewModel.state.value.selectedModelIndex)
+        verify { settingsManager.selectedModelId = fallbackId }
+        verify { settingsManager.setModelIdForSession("s1", fallbackId) }
+    }
+
+    @Test
+    fun `updateModelShortlistShortName edits the short name`() = runTest {
+        val viewModel = createViewModel()
+        val targetId = viewModel.state.value.modelShortlist[0].id
+
+        viewModel.updateModelShortlistShortName(targetId, "Custom")
+
+        val updated = viewModel.state.value.modelShortlist.first { it.id == targetId }
+        assertEquals("Custom", updated.shortName)
+    }
+
+    @Test
+    fun `addModelsToShortlist appends catalog models and dedups`() = runTest {
+        val viewModel = createViewModel()
+        val beforeSize = viewModel.state.value.modelShortlist.size
+        val existing = viewModel.state.value.modelShortlist[0]
+
+        viewModel.addModelsToShortlist(
+            listOf(ModelShortlistItem("anthropic", "claude-x", "Claude X", "Claude"), existing)
+        )
+
+        val after = viewModel.state.value.modelShortlist
+        assertEquals(beforeSize + 1, after.size)
+        assertTrue(after.any { it.id == "anthropic/claude-x" })
     }
 
     @Test
@@ -1827,7 +2138,7 @@ class MainViewModelTest {
 
     @Test
     fun `sendMessage on success clears draft for current session`() = runTest {
-        coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any(), any()) } returns Result.success(Unit)
 
         val viewModel = createViewModel()
         viewModel.selectSession("s1")
@@ -1841,7 +2152,7 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `loadMessages uses per-session saved model index over message inference`() = runTest {
+    fun `loadMessages uses per-session saved model id over message inference`() = runTest {
         val inferredPreset = ModelPresets.list[2]
         val messages = listOf(
             MessageWithParts(
@@ -1853,7 +2164,8 @@ class MainViewModelTest {
             )
         )
         coEvery { repository.getMessages("session-1", 30) } returns Result.success(messages)
-        every { settingsManager.getModelForSession("session-1") } returns 3
+        val savedId = seedShortlistFromPresets()[3].id
+        every { settingsManager.getModelIdForSession("session-1") } returns savedId
 
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
@@ -1862,6 +2174,58 @@ class MainViewModelTest {
         advanceUntilIdle()
 
         assertEquals(3, viewModel.state.value.selectedModelIndex)
+    }
+
+    @Test
+    fun `loadMessages auto-adds a saved model missing from the shortlist`() = runTest {
+        // A saved model that is NOT in the seeded shortlist but whose provider
+        // is known (present in the loaded providers list). Loading the session
+        // must re-add it so the selected id and index stay consistent.
+        val savedId = "anthropic/claude-x"
+        every { settingsManager.getModelIdForSession("session-1") } returns savedId
+        coEvery { repository.getMessages("session-1", 30) } returns Result.success(emptyList())
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                providers = ProvidersResponse(
+                    providers = listOf(ConfigProvider(id = "anthropic", name = "Anthropic"))
+                )
+            )
+        }
+
+        viewModel.loadMessages("session-1")
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.modelShortlist.any { it.id == savedId })
+        assertEquals(savedId, viewModel.state.value.selectedModelId)
+        val idx = viewModel.state.value.modelShortlist.indexOfFirst { it.id == savedId }
+        assertEquals(idx, viewModel.state.value.selectedModelIndex)
+    }
+
+    @Test
+    fun `loadMessages does not auto-add a saved model with unknown provider`() = runTest {
+        // A saved model whose provider is NOT in the loaded providers list
+        // (stale/retired provider). Loading the session must NOT re-add it.
+        val savedId = "ghost/phantom-model"
+        every { settingsManager.getModelIdForSession("session-1") } returns savedId
+        coEvery { repository.getMessages("session-1", 30) } returns Result.success(emptyList())
+
+        val viewModel = createViewModel()
+        updateState(viewModel) {
+            it.copy(
+                currentSessionId = "session-1",
+                providers = ProvidersResponse(
+                    providers = listOf(ConfigProvider(id = "openai", name = "OpenAI"))
+                )
+            )
+        }
+
+        viewModel.loadMessages("session-1")
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.modelShortlist.any { it.id == savedId })
     }
 
     @Test

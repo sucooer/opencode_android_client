@@ -79,6 +79,9 @@ interface OpenCodeApi {
     @GET("config/providers")
     suspend fun getProviders(): ProvidersResponse
 
+    @GET("provider")
+    suspend fun getProviderRegistry(): ProviderRegistryResponse
+
     @GET("agent")
     suspend fun getAgents(): List<AgentInfo>
 
@@ -123,6 +126,7 @@ data class UpdateSessionTimeRequest(
 
 @kotlinx.serialization.Serializable
 data class PromptRequest(
+    @kotlinx.serialization.SerialName("messageID") val messageId: String? = null,
     val parts: List<PartInput>,
     val agent: String = "build",
     val model: ModelInput? = null

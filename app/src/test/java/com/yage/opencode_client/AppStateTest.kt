@@ -1,7 +1,7 @@
 package com.yage.opencode_client
 
 import com.yage.opencode_client.ui.AppState
-import com.yage.opencode_client.ui.ModelPresets
+import com.yage.opencode_client.ui.seedShortlistFromPresets
 import com.yage.opencode_client.data.model.*
 import com.yage.opencode_client.util.ThemeMode
 import org.junit.Assert.*
@@ -153,18 +153,19 @@ class AppStateTest {
     }
 
     @Test
-    fun `availableModels returns curated presets (filtered like iOS)`() {
-        val state = AppState()
+    fun `availableModels derives from the model shortlist`() {
+        val shortlist = seedShortlistFromPresets()
+        val state = AppState(modelShortlist = shortlist)
         val models = state.availableModels
 
-        assertEquals(ModelPresets.list.size, models.size)
-        assertEquals(ModelPresets.list, models)
+        assertEquals(shortlist.size, models.size)
         assertEquals("GLM-5.3", models[0].displayName)
         assertEquals("zai-coding-plan", models[0].providerId)
         assertEquals("glm-5.3", models[0].modelId)
         assertEquals("GPT-5.6 Sol", models[1].displayName)
         assertEquals("openai", models[1].providerId)
         assertEquals("gpt-5.6-sol", models[1].modelId)
+        assertEquals("GPT", models[1].shortName)
         assertFalse(models.any { it.providerId == "openai" && it.modelId == "gpt-5.6-sol-pro" })
         assertFalse(models.any { it.providerId == "openai" && it.modelId == "gpt-5.6-sol-fast" })
         assertTrue(models.any {
@@ -173,25 +174,23 @@ class AppStateTest {
         assertTrue(models.any {
             it.displayName == "GPT-5.6 Luna" && it.providerId == "openai" && it.modelId == "gpt-5.6-luna"
         })
-        assertFalse(models.any { it.modelId == "deepseek-v4-flash:0731" })
-        assertFalse(models.any { it.providerId == "deepseek" && it.modelId == "deepseek-v4-pro" })
     }
 
     @Test
-    fun `availableModels falls back to presets when providers is null`() {
-        val state = AppState(providers = null)
-        assertEquals(ModelPresets.list, state.availableModels)
+    fun `availableModels is empty when the shortlist is empty`() {
+        val state = AppState()
+        assertTrue(state.availableModels.isEmpty())
     }
 
     @Test
-    fun `availableModels uses providers data when available`() {
-        val state = AppState(providers = makeProviders(Triple("openai", "gpt-4", "GPT-4")))
-        val models = state.availableModels
-        assertEquals(1, models.size)
-        assertEquals("GPT-4", models[0].displayName)
-        assertEquals("openai", models[0].providerId)
-        assertEquals("openai", models[0].providerName)
-        assertEquals("gpt-4", models[0].modelId)
+    fun `availableModels independent of providers`() {
+        val shortlist = seedShortlistFromPresets()
+        val stateWithProviders = AppState(
+            providers = makeProviders(Triple("openai", "gpt-4", "GPT-4")),
+            modelShortlist = shortlist
+        )
+        val stateWithoutProviders = AppState(providers = null, modelShortlist = shortlist)
+        assertEquals(stateWithProviders.availableModels, stateWithoutProviders.availableModels)
     }
 
     private fun makeContextUsageState(

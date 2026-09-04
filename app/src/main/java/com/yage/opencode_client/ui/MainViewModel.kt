@@ -76,6 +76,11 @@ data class AppState(
     val agents: List<AgentInfo> = emptyList(),
     val selectedAgentName: String = "build",
     val selectedModelIndex: Int = 2,
+    val selectedModelId: String? = null,
+    val modelShortlist: List<ModelShortlistItem> = emptyList(),
+    val catalogModels: List<CatalogModel> = emptyList(),
+    val providerDisplayNames: Map<String, String> = emptyMap(),
+    val pendingModelShortlistFocus: Boolean = false,
     val providers: ProvidersResponse? = null,
     val pendingPermissions: List<PermissionRequest> = emptyList(),
     val pendingQuestions: List<QuestionRequest> = emptyList(),
@@ -99,6 +104,7 @@ data class AppState(
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
     val sendingSessionIds: Set<String> = emptySet(),
     val sessionSendTimestamps: Map<String, Long> = emptyMap(),
+    val pendingOptimisticMessageIds: Set<String> = emptySet(),
     val imageAttachments: List<ComposerImageAttachment> = emptyList(),
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
@@ -115,25 +121,9 @@ data class AppState(
     val aiUsageError: String? = null
 ) {
     data class NfcPendingAction(val prompt: String, val autoSend: Boolean)
-    data class ModelOption(val displayName: String, val providerId: String, val modelId: String, val providerName: String = "") {
+    data class ModelOption(val displayName: String, val providerId: String, val modelId: String, val customShortName: String? = null) {
         val shortName: String
-            get() = when {
-                displayName == "DeepSeek V4 Flash" -> "DS-Flash"
-                displayName == "DeepSeek Local" -> "DS-L"
-                displayName == "Ollama GLM 5.2" -> "OGLM-5.2"
-                displayName == "GPT-5.6 Terra Fast" -> "GPT-TF"
-                displayName == "GPT-5.6 Luna" -> "GPT-L"
-                "Haiku" in displayName -> "Haiku"
-                "Gemini" in displayName -> "Gemini"
-                "GPT" in displayName -> "GPT"
-                "Grok" in displayName -> "Grok"
-                "deepseek" in modelId.lowercase() -> "DS"
-                "glm" in modelId.lowercase() -> "GLM"
-                "qwen" in modelId.lowercase() -> "Qwen"
-                "Qwen" in displayName -> "Qwen"
-                displayName.length > 12 -> displayName.split(" ").firstOrNull()?.take(8) ?: displayName.take(12)
-                else -> displayName.split(" ").firstOrNull() ?: displayName
-            }
+            get() = customShortName?.trim()?.takeIf { it.isNotEmpty() } ?: suggestedShortName(displayName)
     }
 
     data class ContextUsage(
@@ -212,8 +202,12 @@ data class AppState(
         val themeMode: ThemeMode = ThemeMode.SYSTEM,
         val languageMode: LanguageMode = LanguageMode.SYSTEM,
         val selectedModelIndex: Int = 2,
+        val selectedModelId: String? = null,
         val selectedAgentName: String = "build",
-        val availableModels: List<ModelOption> = ModelPresets.list,
+        val availableModels: List<ModelOption> = emptyList(),
+        val modelShortlist: List<ModelShortlistItem> = emptyList(),
+        val catalogModels: List<CatalogModel> = emptyList(),
+        val providerDisplayNames: Map<String, String> = emptyMap(),
         val contextUsage: ContextUsage? = null,
         val agents: List<AgentInfo> = emptyList(),
         val providers: ProvidersResponse? = null,
@@ -282,8 +276,12 @@ data class AppState(
             themeMode = themeMode,
             languageMode = languageMode,
             selectedModelIndex = selectedModelIndex,
+            selectedModelId = selectedModelId,
             selectedAgentName = selectedAgentName,
             availableModels = availableModels,
+            modelShortlist = modelShortlist,
+            catalogModels = catalogModels,
+            providerDisplayNames = providerDisplayNames,
             contextUsage = contextUsage,
             agents = agents,
             providers = providers,
@@ -308,20 +306,15 @@ data class AppState(
     val visibleAgents: List<AgentInfo>
         get() = agents.filter { it.isVisible }
 
-    /** Dynamic model list from server providers API, fallback to presets. */
+    /** Curated model list (the user shortlist), not the full API response. */
     val availableModels: List<ModelOption>
-        get() {
-            val fromProviders = providers?.providers?.flatMap { provider ->
-                provider.models.map { (modelKey, model) ->
-                    ModelOption(
-                        displayName = model.name ?: modelKey,
-                        providerId = provider.id,
-                        providerName = provider.name ?: provider.id,
-                        modelId = modelKey
-                    )
-                }
-            }?.takeIf { it.isNotEmpty() }
-            return fromProviders ?: ModelPresets.list
+        get() = modelShortlist.map { item ->
+            ModelOption(
+                displayName = item.displayName,
+                providerId = item.providerId,
+                modelId = item.modelId,
+                customShortName = item.shortName
+            )
         }
 
     val selectedAIUsageQuota: AIUsageQuota?
@@ -338,17 +331,7 @@ data class AppState(
         }
 
     private val providerModelsIndex: Map<String, ProviderModel>
-        get() = providers?.providers?.flatMap { provider ->
-            provider.models.flatMap { (modelKey, model) ->
-                listOfNotNull(
-                    "${provider.id}/$modelKey" to model,
-                    model.id.takeIf { it.isNotEmpty() }?.let { "${provider.id}/$it" to model },
-                    model.resolvedProviderId?.let { resolvedProvider ->
-                        model.id.takeIf { it.isNotEmpty() }?.let { modelId -> "$resolvedProvider/$modelId" to model }
-                    }
-                )
-            }
-        }?.toMap() ?: emptyMap()
+        get() = buildProviderModelsIndex(providers)
 
     val contextUsage: ContextUsage?
         get() {
@@ -1518,6 +1501,7 @@ class MainViewModel @Inject constructor(
                 sessionTodos = emptyMap(),
                 sendingSessionIds = emptySet(),
                 sessionSendTimestamps = emptyMap(),
+                pendingOptimisticMessageIds = emptySet(),
                 agents = emptyList(),
                 providers = null,
                 filePathToShowInFiles = null,
@@ -1563,7 +1547,7 @@ class MainViewModel @Inject constructor(
     }
 
     private fun loadProviders() {
-        launchLoadProviders(hostRuntimeScope, repository, _state) { message, error ->
+        launchLoadProviders(hostRuntimeScope, repository, _state, settingsManager) { message, error ->
             reportNonFatalIssue(TAG, message, error)
         }
     }
@@ -1600,8 +1584,24 @@ class MainViewModel @Inject constructor(
         val attachments = _state.value.imageAttachments
         if (text.isEmpty() && attachments.isEmpty()) return
 
+        // Insert the optimistic user row immediately so the send feels instant, then
+        // clear the composer. The row carries the same deterministic msg_ id we send
+        // to the server, so reconciliation in loadMessages is pure id membership.
+        val messageId = makeServerId("msg")
+        val optimistic = buildOptimisticMessage(
+            sessionId = sessionId,
+            text = text,
+            attachments = attachments,
+            messageId = messageId,
+            parentMessageId = _state.value.messages.lastOrNull()?.info?.id
+        )
+
         _state.update { state ->
             state.copy(
+                messages = state.messages + optimistic,
+                pendingOptimisticMessageIds = state.pendingOptimisticMessageIds + messageId,
+                inputText = "",
+                imageAttachments = emptyList(),
                 sendingSessionIds = state.sendingSessionIds + sessionId,
                 sessionSendTimestamps = state.sessionSendTimestamps + (sessionId to System.currentTimeMillis())
             )
@@ -1621,11 +1621,11 @@ class MainViewModel @Inject constructor(
                 attachments = attachments,
                 agent = agent,
                 model = model,
+                messageId = messageId,
                 onRefreshMessages = ::loadMessagesWithRetry,
                 onRefreshSessions = ::loadSessions,
                 onSuccess = {
                     settingsManager.setDraftText(sessionId, "")
-                    _state.update { it.copy(imageAttachments = emptyList()) }
                 },
                 onComplete = {
                     _state.update { state ->
@@ -1648,7 +1648,18 @@ class MainViewModel @Inject constructor(
                         dispatchSend()
                     }
                     .onFailure { error ->
-                        _state.update { it.copy(error = "Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}") }
+                        // Restoring the archived session failed; roll back the optimistic row.
+                        _state.update { state ->
+                            state.copy(
+                                messages = state.messages.filter { m -> m.info.id != messageId },
+                                pendingOptimisticMessageIds = state.pendingOptimisticMessageIds - messageId,
+                                inputText = text,
+                                imageAttachments = attachments,
+                                sendingSessionIds = state.sendingSessionIds - sessionId,
+                                sessionSendTimestamps = state.sessionSendTimestamps - sessionId,
+                                error = "Failed to restore session: ${errorMessageOrFallback(error, "unknown error")}"
+                            )
+                        }
                     }
             }
             return
@@ -1752,11 +1763,102 @@ class MainViewModel @Inject constructor(
     }
 
     fun selectModel(index: Int) {
-        val availableSize = _state.value.availableModels.size
-        val clamped = index.coerceIn(0, availableSize - 1)
-        settingsManager.selectedModelIndex = clamped
-        _state.update { it.copy(selectedModelIndex = clamped) }
-        _state.value.currentSessionId?.let { settingsManager.setModelForSession(it, clamped) }
+        val list = _state.value.modelShortlist
+        if (list.isEmpty()) return
+        val clamped = index.coerceIn(0, list.size - 1)
+        val id = list[clamped].id
+        settingsManager.selectedModelId = id
+        _state.update { it.copy(selectedModelIndex = clamped, selectedModelId = id) }
+        _state.value.currentSessionId?.let { settingsManager.setModelIdForSession(it, id) }
+    }
+
+    fun moveModelShortlist(from: Int, to: Int) {
+        val current = _state.value.modelShortlist
+        val next = moveShortlistItem(current, from, to)
+        if (next == current) return
+        settingsManager.modelShortlistJson = encodeShortlist(next)
+        _state.update {
+            it.copy(modelShortlist = next, selectedModelIndex = reanchorSelectedModelIndex(next, it.selectedModelId))
+        }
+    }
+
+    fun removeModelShortlistItem(id: String) {
+        val current = _state.value.modelShortlist
+        val next = removeShortlistItem(current, id)
+        if (next == current) return
+        settingsManager.modelShortlistJson = encodeShortlist(next)
+        // If the removed model was the current selection, fall back to the first
+        // remaining model (or none) and persist that to both the global selection
+        // and the current session, so a restart doesn't re-read the deleted ID.
+        val wasSelected = _state.value.selectedModelId == id
+        val selectedId = if (wasSelected) next.firstOrNull()?.id else _state.value.selectedModelId
+        if (wasSelected) {
+            settingsManager.selectedModelId = next.firstOrNull()?.id
+            _state.value.currentSessionId?.let { sessionId ->
+                val fallbackId = next.firstOrNull()?.id
+                if (fallbackId != null) settingsManager.setModelIdForSession(sessionId, fallbackId)
+                else settingsManager.removeModelIdForSession(sessionId)
+            }
+        }
+        _state.update {
+            it.copy(
+                modelShortlist = next,
+                selectedModelId = selectedId,
+                selectedModelIndex = reanchorSelectedModelIndex(next, selectedId)
+            )
+        }
+    }
+
+    fun updateModelShortlistShortName(id: String, shortName: String) {
+        val current = _state.value.modelShortlist
+        val next = updateShortlistShortName(current, id, shortName)
+        if (next == current) return
+        settingsManager.modelShortlistJson = encodeShortlist(next)
+        _state.update { it.copy(modelShortlist = next) }
+    }
+
+    fun addModelsToShortlist(items: List<ModelShortlistItem>) {
+        var next = _state.value.modelShortlist
+        var changed = false
+        for (item in items) {
+            val (added, c) = addModelToShortlist(next, item.providerId, item.modelId, item.displayName)
+            next = added
+            changed = changed || c
+        }
+        if (!changed) return
+        settingsManager.modelShortlistJson = encodeShortlist(next)
+        // Ensure the ID invariant: a non-empty shortlist always has a valid
+        // selectedModelId. When the shortlist was empty (selectedModelId null)
+        // and we just added items, anchor to the first item and persist.
+        val currentId = _state.value.selectedModelId
+        val resolvedId = if (currentId != null && next.any { it.id == currentId }) {
+            currentId
+        } else {
+            next.firstOrNull()?.id
+        }
+        if (resolvedId != currentId) {
+            settingsManager.selectedModelId = resolvedId
+            _state.value.currentSessionId?.let { sessionId ->
+                if (resolvedId != null) settingsManager.setModelIdForSession(sessionId, resolvedId)
+                else settingsManager.removeModelIdForSession(sessionId)
+            }
+        }
+        _state.update {
+            it.copy(
+                modelShortlist = next,
+                selectedModelId = resolvedId,
+                selectedModelIndex = reanchorSelectedModelIndex(next, resolvedId)
+            )
+        }
+    }
+
+    /** Asks the Settings screen to open the model shortlist when it appears. */
+    fun requestModelShortlistFocus() {
+        _state.update { it.copy(pendingModelShortlistFocus = true) }
+    }
+
+    fun clearModelShortlistFocus() {
+        _state.update { it.copy(pendingModelShortlistFocus = false) }
     }
 
     fun setThemeMode(mode: ThemeMode) {

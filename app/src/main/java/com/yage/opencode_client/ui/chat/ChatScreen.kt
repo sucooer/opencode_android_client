@@ -47,6 +47,7 @@ fun ChatScreen(
     onNavigateToFiles: (String) -> Unit = {},
     useInlineFilePreview: Boolean = false,
     onNavigateToSettings: () -> Unit = {},
+    onManageModels: () -> Unit = {},
     showSettingsButton: Boolean = true,
     showNewSessionInTopBar: Boolean = true,
     showSessionListInTopBar: Boolean = true
@@ -176,6 +177,10 @@ fun ChatScreen(
                 onRefreshSessions = viewModel::loadSessions,
                 onToggleSessionExpanded = viewModel::toggleSessionExpanded,
                 onSelectModel = viewModel::selectModel,
+                onManageModels = {
+                    viewModel.requestModelShortlistFocus()
+                    onManageModels()
+                },
                 onOpenAIUsage = viewModel::loadAIUsage,
                 onRefreshAIUsage = viewModel::refreshAIUsage,
                 onNavigateToSettings = onNavigateToSettings,
@@ -294,6 +299,7 @@ fun ChatScreen(
             ChatInputBar(
                 text = state.inputText,
                 isBusy = currentSessionIsRunning,
+                isSending = state.currentSessionId?.let { it in state.sendingSessionIds } == true,
                 isRecording = state.isRecording,
                 isTranscribing = state.isTranscribing,
                 hasPreservedSpeechAudio = state.hasPreservedSpeechAudio,
