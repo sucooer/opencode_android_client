@@ -1,5 +1,12 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-09-21 — Docked file preview in phone chat
+
+- 对齐 iOS PR #159：手机 Chat 点文件后停靠预览，底部仍用原来的 `ChatInputBar`，不再跳 Files 或开全屏 Dialog。
+- 根层 `rememberSaveable` 保存预览请求；host/session/directory 不对时关闭；变宽到 Expanded 时把当前文件交给中栏。
+- 消息列表 `LazyListState` 提到 ChatScreen，关闭预览后不强制跳到底部。
+- 验证：`./gradlew testDebugUnitTest`；仪器测试未在真机跑。
+
 ## 2026-09-21 — Keep loaded session window across refresh
 
 - `launchLoadSessions` 不再把 `loadedSessionLimit` 重置为 400，也不再清掉 in-flight 的 load more 标志。刷新使用当前已加载窗口；迟到的较小窗口响应会被丢掉，避免 Load older 之后列表缩回去。

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -105,11 +106,13 @@ internal fun ChatMessageList(
     onFileClick: (String) -> Unit,
     onMarkdownLinkClick: (String) -> Unit,
     onForkFromMessage: (String) -> Unit,
-    onEditFromMessage: (String) -> Unit
+    onEditFromMessage: (String) -> Unit,
+    listState: LazyListState = rememberLazyListState()
 ) {
-    val listState = rememberLazyListState()
     val layoutInfo = listState.layoutInfo
-    var shouldAutoScroll by remember { mutableStateOf(true) }
+    var shouldAutoScroll by remember(listState) {
+        mutableStateOf(listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 24)
+    }
     val contentVersion = remember(messages, streamingPartTexts, streamingReasoningPart, isLoading) {
         messages.size +
             messages.sumOf { it.parts.size } +
