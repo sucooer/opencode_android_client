@@ -1,5 +1,11 @@
 # OpenCode Android 客户端工作日志
 
+## 2026-09-21 — Keep loaded session window across refresh
+
+- `launchLoadSessions` 不再把 `loadedSessionLimit` 重置为 400，也不再清掉 in-flight 的 load more 标志。刷新使用当前已加载窗口；迟到的较小窗口响应会被丢掉，避免 Load older 之后列表缩回去。
+- Session 列表刷新结束不再自动滚回顶部。
+- 单测覆盖：load more 后刷新、连续扩到 1200、乱序响应、SSE/发送触发的刷新、选中项补回不影响 hasMore、host 切换丢弃在途请求。
+
 ## 2026-08-14 — GLM 5.3 + Gemini 3.7 Flash model preset upgrade
 
 - 模型列表顶部 `zai-coding-plan` 的 GLM 从 `GLM-5.2` / `glm-5.2` 升级为 `GLM-5.3` / `glm-5.3`，与 iOS 客户端对齐。`models.dev` 上 `zai-coding-plan` 已列出 `glm-5.3`。

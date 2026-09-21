@@ -47,7 +47,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -316,14 +315,6 @@ fun SessionList(
         if (archivedExpanded) flattenVisibleTree(archivedTree, expandedSessionIds) else emptyList()
     }
     val listState = rememberLazyListState()
-    var wasRefreshing by remember { mutableStateOf(false) }
-
-    LaunchedEffect(isRefreshingSessions) {
-        if (wasRefreshing && !isRefreshingSessions && (activeRows.isNotEmpty() || archivedRows.isNotEmpty())) {
-            listState.animateScrollToItem(0)
-        }
-        wasRefreshing = isRefreshingSessions
-    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Surface(
