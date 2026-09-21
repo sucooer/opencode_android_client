@@ -44,7 +44,10 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import com.yage.opencode_client.ui.MainViewModel
 import com.yage.opencode_client.ui.DeepLinkError
+import com.yage.opencode_client.ui.chat.ChatFilePreviewRequest
+import com.yage.opencode_client.ui.chat.ChatFilePreviewRequestSaver
 import com.yage.opencode_client.ui.chat.ChatScreen
+import com.yage.opencode_client.ui.chat.belongsTo
 import com.yage.opencode_client.ui.files.FilesScreen
 import com.yage.opencode_client.ui.files.FilesViewModel
 import com.yage.opencode_client.ui.session.SessionList
@@ -154,13 +157,41 @@ class MainActivity : AppCompatActivity() {
             }
             val windowSizeClass = calculateWindowSizeClass(this)
             val isTablet = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded
+            var dockedPreviewRequest by rememberSaveable(stateSaver = ChatFilePreviewRequestSaver) {
+                mutableStateOf<ChatFilePreviewRequest?>(null)
+            }
+            LaunchedEffect(
+                isTablet,
+                dockedPreviewRequest,
+                state.currentHostProfileId,
+                state.currentSessionId,
+                state.currentSession?.directory
+            ) {
+                val request = dockedPreviewRequest ?: return@LaunchedEffect
+                if (!request.belongsTo(state.currentHostProfileId, state.currentSessionId, state.currentSession?.directory)) {
+                    if (dockedPreviewRequest === request) {
+                        dockedPreviewRequest = null
+                    }
+                    return@LaunchedEffect
+                }
+                if (isTablet) {
+                    mainViewModel.showFileInFiles(request.path)
+                    if (dockedPreviewRequest === request) {
+                        dockedPreviewRequest = null
+                    }
+                }
+            }
 
             OpenCodeTheme(darkTheme = darkTheme) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     if (isTablet) {
                         TabletLayout(viewModel = mainViewModel)
                     } else {
-                        PhoneLayout(viewModel = mainViewModel)
+                        PhoneLayout(
+                            viewModel = mainViewModel,
+                            dockedPreviewRequest = dockedPreviewRequest,
+                            onDockedPreviewRequestChange = { dockedPreviewRequest = it }
+                        )
                     }
                     DeepLinkFeedback(
                         isResolving = state.isResolvingDeepLink,
@@ -222,7 +253,11 @@ class MainActivity : AppCompatActivity() {
 }
 
 @Composable
-private fun PhoneLayout(viewModel: MainViewModel) {
+private fun PhoneLayout(
+    viewModel: MainViewModel,
+    dockedPreviewRequest: ChatFilePreviewRequest?,
+    onDockedPreviewRequestChange: (ChatFilePreviewRequest?) -> Unit
+) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
@@ -279,6 +314,8 @@ private fun PhoneLayout(viewModel: MainViewModel) {
                         viewModel.showFileInFiles(path, originRoute = Screen.Chat.route)
                         navigateToTopLevel(Screen.Files.route)
                     },
+                    dockedPreviewRequest = dockedPreviewRequest,
+                    onDockedPreviewRequestChange = onDockedPreviewRequestChange,
                     onNavigateToSettings = {
                         navigateToTopLevel(Screen.Settings.route)
                     },

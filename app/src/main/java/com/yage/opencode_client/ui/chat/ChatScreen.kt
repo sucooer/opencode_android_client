@@ -4,14 +4,15 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -23,10 +24,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yage.opencode_client.R
@@ -34,18 +35,19 @@ import com.yage.opencode_client.data.model.MessageWithParts
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.ui.MainViewModel
-import com.yage.opencode_client.ui.files.FilesScreen
 import com.yage.opencode_client.ui.files.WorkspaceMarkdownLinkResolver
 import com.yage.opencode_client.util.OpenCodeDeepLinkParser
 import com.yage.opencode_client.ui.sanitizeBearerToken
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
     viewModel: MainViewModel,
     onNavigateToFiles: (String) -> Unit = {},
     useInlineFilePreview: Boolean = false,
+    dockedPreviewRequest: ChatFilePreviewRequest? = null,
+    onDockedPreviewRequestChange: (ChatFilePreviewRequest?) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onManageModels: () -> Unit = {},
     showSettingsButton: Boolean = true,
@@ -72,8 +74,27 @@ fun ChatScreen(
             viewModel.addImageAttachments(loadImageAttachments(context, uris))
         }
     }
-    var previewRequest by remember { mutableStateOf<WorkspacePreviewRequest?>(null) }
     var linkError by remember { mutableStateOf<String?>(null) }
+    val messageListState = remember(state.currentHostProfileId, state.currentSessionId) { LazyListState() }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val imeVisible = WindowInsets.isImeVisible
+
+    fun openFileInChat(path: String) {
+        if (useInlineFilePreview) {
+            onNavigateToFiles(path)
+            return
+        }
+        val sessionId = state.currentSessionId ?: return
+        onDockedPreviewRequestChange(
+            ChatFilePreviewRequest(
+                path = path,
+                hostProfileId = state.currentHostProfileId,
+                sessionId = sessionId,
+                workspaceDirectory = state.currentSession?.directory
+            )
+        )
+    }
 
     fun handleAssistantMarkdownLink(href: String) {
         if (OpenCodeDeepLinkParser.handles(href)) {
@@ -87,20 +108,21 @@ fun ChatScreen(
                 runCatching { context.startActivity(intent) }
                     .onFailure { linkError = it.message ?: "Could not open link" }
             }
-            is WorkspaceMarkdownLinkResolver.Resolution.Preview -> {
-                if (useInlineFilePreview) {
-                    onNavigateToFiles(resolution.path)
-                } else {
-                    previewRequest = WorkspacePreviewRequest(
-                        path = resolution.path,
-                        hostProfileId = state.currentHostProfileId,
-                        sessionId = state.currentSessionId,
-                        workspaceDirectory = workspaceDirectory.orEmpty()
-                    )
-                }
-            }
+            is WorkspaceMarkdownLinkResolver.Resolution.Preview -> openFileInChat(resolution.path)
             WorkspaceMarkdownLinkResolver.Resolution.Ignored -> Unit
             is WorkspaceMarkdownLinkResolver.Resolution.Rejected -> linkError = resolution.message
+        }
+    }
+
+    LaunchedEffect(
+        dockedPreviewRequest,
+        state.currentHostProfileId,
+        state.currentSessionId,
+        state.currentSession?.directory
+    ) {
+        val request = dockedPreviewRequest ?: return@LaunchedEffect
+        if (!request.belongsTo(state.currentHostProfileId, state.currentSessionId, state.currentSession?.directory)) {
+            onDockedPreviewRequestChange(null)
         }
     }
 
@@ -141,8 +163,40 @@ fun ChatScreen(
         )
     }
 
+    val validDockedRequest = dockedPreviewRequest?.takeIf {
+        it.belongsTo(state.currentHostProfileId, state.currentSessionId, state.currentSession?.directory)
+    }
+    BackHandler(enabled = validDockedRequest != null) {
+        if (imeVisible) {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+        } else {
+            onDockedPreviewRequestChange(null)
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        ChatTopBar(
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            if (validDockedRequest != null) {
+                ChatInlineFilePreview(
+                    request = validDockedRequest,
+                    repository = viewModel.repository,
+                    onClose = { onDockedPreviewRequestChange(null) },
+                    onRequestChange = { source, updated ->
+                        if (dockedPreviewRequest === source) {
+                            onDockedPreviewRequestChange(updated)
+                        }
+                    },
+                    onLinkError = { linkError = it },
+                    onOpenExternal = { url ->
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        runCatching { context.startActivity(intent) }
+                            .onFailure { linkError = it.message ?: "Could not open link" }
+                    }
+                )
+            } else {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    ChatTopBar(
             state = ChatTopBarState(
                 sessions = state.sessions,
                 currentSessionId = state.currentSessionId,
@@ -210,15 +264,19 @@ fun ChatScreen(
                     workspaceDirectory = state.currentSession?.directory,
                     completedTurnActivities = completedTurnActivities,
                     onLoadMore = { viewModel.loadMoreMessages() },
-                    onFileClick = onNavigateToFiles,
+                    onFileClick = ::openFileInChat,
                     onMarkdownLinkClick = ::handleAssistantMarkdownLink,
                     onForkFromMessage = { messageId ->
                         state.currentSessionId?.let { sessionId ->
                             viewModel.forkSession(sessionId, messageId)
                         }
                     },
-                    onEditFromMessage = viewModel::editFromMessage
+                    onEditFromMessage = viewModel::editFromMessage,
+                    listState = messageListState
                 )
+            }
+                    }
+                }
             }
 
             state.error?.let { error ->
@@ -244,31 +302,6 @@ fun ChatScreen(
                     }
                 ) {
                     Text(error)
-                }
-            }
-        }
-
-        previewRequest?.let { request ->
-            if (request.hostProfileId != state.currentHostProfileId ||
-                request.sessionId != state.currentSessionId ||
-                request.workspaceDirectory != state.currentSession?.directory
-            ) {
-                LaunchedEffect(request, state.currentHostProfileId, state.currentSessionId, state.currentSession?.directory) {
-                    previewRequest = null
-                    linkError = "Workspace changed; reopen the link from the current session."
-                }
-            } else {
-                Dialog(
-                    onDismissRequest = { previewRequest = null },
-                    properties = DialogProperties(usePlatformDefaultWidth = false)
-                ) {
-                    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                        FilesScreen(
-                            pathToShow = request.path,
-                            sessionDirectory = request.workspaceDirectory,
-                            onCloseFile = { previewRequest = null }
-                        )
-                    }
                 }
             }
         }
@@ -350,13 +383,6 @@ fun ChatScreen(
             }
     }
 }
-
-private data class WorkspacePreviewRequest(
-    val path: String,
-    val hostProfileId: String?,
-    val sessionId: String?,
-    val workspaceDirectory: String
-)
 
 private data class CurrentSessionActivity(
     val text: String,
