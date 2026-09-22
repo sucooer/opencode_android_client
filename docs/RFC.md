@@ -10,7 +10,7 @@
 | **标题** | OpenCode Android Client 技术方案 |
 | **状态** | Accepted + Phase 8 SSH Host Profiles Draft |
 | **创建日期** | 2026-02 |
-| **最后更新** | 2026-06-21 |
+| **最后更新** | 2026-09-21 |
 | **PRD 引用** | [PRD.md](PRD.md) |
 
 ---
@@ -69,6 +69,7 @@ SSH Tunnel 模式下，OpenCode REST/SSE 仍然使用同一套 OkHttp/Retrofit/S
 | 依赖注入 | Hilt | 官方推荐，Dagger 封装 |
 | Markdown | multiplatform-markdown-renderer-m3 | 已落地，Compose 兼容性好 |
 | Markdown Web Preview | Android WebView + bundled markdown-it + DOMPurify | Phase 7 对齐 iOS PR #94，承载 HTML-in-Markdown / CSS cards / inline SVG |
+| Phone docked file preview | ChatInlineFilePreview + FilePreviewPane above ChatInputBar | 对齐 iOS PR #159：手机 Chat 内停靠预览，输入栏常驻；Expanded 时迁到中栏 |
 | SSH Tunnel | mwiede/JSch | Java 实现、依赖面小，适合 app 内 local port forwarding；Apache Mina SSHD 作为替代方案 |
 | 安全存储 | EncryptedSharedPreferences + Keystore | Android 官方方案 |
 

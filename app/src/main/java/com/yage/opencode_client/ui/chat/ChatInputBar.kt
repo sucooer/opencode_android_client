@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -194,7 +195,8 @@ internal fun ChatInputBar(
                         onValueChange = onTextChange,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 66.dp, max = 132.dp),
+                            .heightIn(min = 66.dp, max = 132.dp)
+                            .testTag("chat-input"),
                         textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         maxLines = 6
@@ -209,7 +211,8 @@ internal fun ChatInputBar(
                     dimWhenDisabled = true,
                     icon = Icons.AutoMirrored.Filled.Send,
                     contentDescription = stringResource(R.string.chat_send),
-                    progress = isSending
+                    progress = isSending,
+                    testTag = "chat-send"
                 )
             }
 
@@ -532,7 +535,8 @@ private fun ChatPrimaryActionButton(
     dimWhenDisabled: Boolean,
     icon: ImageVector,
     contentDescription: String,
-    progress: Boolean = false
+    progress: Boolean = false,
+    testTag: String? = null
 ) {
     val effectiveAlpha = if (!enabled && dimWhenDisabled) 0.35f else 1f
     val interaction = remember { MutableInteractionSource() }
@@ -547,6 +551,7 @@ private fun ChatPrimaryActionButton(
                 indication = null,
                 onClick = onClick
             )
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
             .semantics {
                 this.contentDescription = contentDescription
                 this.role = Role.Button

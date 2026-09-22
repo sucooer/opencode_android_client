@@ -221,6 +221,7 @@ iOS 在每条 assistant 消息旁显示回复该消息的模型名称（如 `ant
 
 - **文件树**：递归展示工作目录，支持 git 状态颜色标记 ✅
 - **文件预览**：文本文件等宽字体显示，Markdown 文件支持 Native / Web / Source 三态预览。Web Preview 对齐 iOS PR #94，使用本地 WebView shell 渲染 HTML-in-Markdown、CSS 卡片、inline SVG、`<details>`、宽表和 workspace 相对图片。默认打开 Web Preview，失败或大文件时可退回 Native / Source。🔲 Phase 7
+- **手机 Chat 停靠预览**：在 Chat 里点文件卡片或 workspace Markdown 链接时，预览停靠在输入栏上方，不跳 Files、不全屏挡住输入。语音和文字输入保持可用来继续给 AI 发指令。系统返回先收键盘再关预览。平板仍把预览放到中栏。✅
 - **图片预览**：图片默认 fit-to-screen，支持双击放大、拖动平移、系统分享 ✅
 - **Session 变更**：🔲 暂不实现
 

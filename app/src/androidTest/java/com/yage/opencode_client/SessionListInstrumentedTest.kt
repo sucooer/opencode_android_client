@@ -1,6 +1,7 @@
 package com.yage.opencode_client
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -75,6 +76,42 @@ class SessionListInstrumentedTest {
 
         composeRule.onNodeWithText("Load older").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) { loadMoreCalls.get() > 0 }
+    }
+
+    @Test
+    fun sessionListDoesNotJumpToTopWhenBackgroundRefreshCompletes() {
+        val sessions = (1..40).map { index ->
+            Session(
+                id = "session-$index",
+                directory = "/tmp/project-$index",
+                title = "Session $index"
+            )
+        }
+        val refreshing = mutableStateOf(false)
+
+        composeRule.setContent {
+            MaterialTheme {
+                SessionList(
+                    sessions = sessions,
+                    currentSessionId = "session-1",
+                    isRefreshingSessions = refreshing.value,
+                    onSelectSession = {},
+                    onCreateSession = {},
+                    onDeleteSession = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("session_list")
+            .performScrollToNode(hasText("Session 40"))
+        composeRule.onNodeWithText("Session 40").assertIsDisplayed()
+
+        composeRule.runOnIdle { refreshing.value = true }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle { refreshing.value = false }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Session 40").assertIsDisplayed()
     }
 
     @Test
