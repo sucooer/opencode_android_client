@@ -79,7 +79,8 @@ class OpenCodeRepository @Inject constructor() {
 
     @Synchronized
     fun configure(baseUrl: String, username: String? = null, password: String? = null) {
-        this.baseUrl = baseUrl
+        val normalized = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
+        this.baseUrl = normalized.trimEnd('/')
         this.username = username
         this.password = password
         rebuildClients()
@@ -114,7 +115,11 @@ class OpenCodeRepository @Inject constructor() {
     }
 
     suspend fun deleteSession(sessionId: String): Result<Unit> = apiCall {
-        api.deleteSession(sessionId)
+        val response = api.deleteSession(sessionId)
+        if (!response.isSuccessful) {
+            val errorBody = response.errorBody()?.string() ?: response.message()
+            throw Exception("Delete failed ${response.code()}: $errorBody")
+        }
     }
 
     suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> = apiCall {

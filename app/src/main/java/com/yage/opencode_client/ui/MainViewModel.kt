@@ -325,17 +325,19 @@ data class AppState(
             )
         }
 
+    val selectedModelQuotaKey: AIUsageQuotaKey?
+        get() = primaryQuotaKey(availableModels.getOrNull(selectedModelIndex)?.providerId)
+
     val selectedAIUsageQuota: AIUsageQuota?
         get() {
-            val provider = when (availableModels.getOrNull(selectedModelIndex)?.providerId) {
-                "openai" -> "codex"
-                "zai-coding-plan" -> "glm"
-                "ollama-cloud" -> "ollama"
-                else -> return null
-            }
-            return aiUsageQuotaSnapshot?.quotas?.firstOrNull {
-                it.provider.equals(provider, ignoreCase = true) && it.label.equals("5h", ignoreCase = true)
-            }
+            val key = selectedModelQuotaKey ?: return null
+            return aiUsageQuotaSnapshot?.quotas?.let { resolveQuota(it, key) }
+        }
+
+    val isSelectedModelQuotaStale: Boolean
+        get() {
+            val snapshot = aiUsageQuotaSnapshot ?: return false
+            return isQuotaSnapshotStale(snapshot.fetchedAtMs, System.currentTimeMillis(), aiUsageError != null)
         }
 
     private val providerModelsIndex: Map<String, ProviderModel>
@@ -454,6 +456,7 @@ class MainViewModel @Inject constructor(
     private var lastHealthCheckTime = 0L
     private var deepLinkRouteGeneration = 0L
     private var deepLinkJob: Job? = null
+    private var childSessionJob: Job? = null
     private var hostRuntimeJob = SupervisorJob(viewModelScope.coroutineContext[Job])
     private val hostRuntimeScope: CoroutineScope
         get() = CoroutineScope(viewModelScope.coroutineContext + hostRuntimeJob)
@@ -631,7 +634,7 @@ class MainViewModel @Inject constructor(
             _state.update { it.copy(isLoadingAIUsage = true, aiUsageError = null) }
             aiUsageClient.fetchQuotas(url)
                 .onSuccess { snapshot ->
-                    _state.update { it.copy(aiUsageQuotaSnapshot = snapshot, isLoadingAIUsage = false) }
+                    _state.update { it.copy(aiUsageQuotaSnapshot = snapshot, isLoadingAIUsage = false, aiUsageError = null) }
                 }
                 .onFailure { error ->
                     _state.update { it.copy(isLoadingAIUsage = false, aiUsageError = error.message) }
@@ -657,7 +660,8 @@ class MainViewModel @Inject constructor(
                         it.copy(
                             aiUsageQuotaSnapshot = snapshot,
                             isLoadingAIUsage = false,
-                            isRefreshingAIUsage = false
+                            isRefreshingAIUsage = false,
+                            aiUsageError = null
                         )
                     }
                 }
@@ -1412,6 +1416,36 @@ class MainViewModel @Inject constructor(
         loadSessionStatus()
     }
 
+    fun openChildSession(sessionId: String) {
+        if (sessionId.isBlank()) return
+        childSessionJob?.cancel()
+        childSessionJob = hostRuntimeScope.launch {
+            repository.getSession(sessionId)
+                .onSuccess { session ->
+                    _state.update {
+                        it.copy(
+                            sessions = upsertSession(it.sessions, session),
+                            deepLinkError = null
+                        )
+                    }
+                    if (_state.value.currentSessionId != session.id) {
+                        selectSession(session.id)
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            deepLinkError = if (error is HttpException && error.code() == 404) {
+                                DeepLinkError.SESSION_UNAVAILABLE
+                            } else {
+                                DeepLinkError.OPEN_FAILED
+                            }
+                        )
+                    }
+                }
+        }
+    }
+
     fun receiveDeepLink(rawUrl: String) {
         when (val parsed = OpenCodeDeepLinkParser.parse(rawUrl)) {
             is OpenCodeDeepLinkParseResult.Success -> {
@@ -1570,7 +1604,12 @@ class MainViewModel @Inject constructor(
         hostRuntimeScope.launch {
             repository.getAgents()
                 .onSuccess { agents ->
-                    _state.update { it.copy(agents = agents) }
+                    _state.update {
+                        it.copy(
+                            agents = agents,
+                            selectedAgentName = effectiveSelectedAgent(it.selectedAgentName, agents)
+                        )
+                    }
                 }
                 .onFailure { error ->
                     reportNonFatalIssue(TAG, "Failed to load agents", error)
@@ -1639,7 +1678,7 @@ class MainViewModel @Inject constructor(
             )
         }
 
-        val agent = _state.value.selectedAgentName
+        val agent = effectiveSelectedAgent(_state.value.selectedAgentName, _state.value.agents)
         val model = buildSelectedModel(_state.value)
         val currentSession = _state.value.currentSession
 

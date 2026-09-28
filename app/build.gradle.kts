@@ -54,8 +54,8 @@ android {
         applicationId = "com.yage.opencode_client"
         minSdk = 26
         targetSdk = 34
-        versionCode = ciVersionCode ?: 18
-        versionName = ciVersionName ?: "0.1.20260904"
+        versionCode = ciVersionCode ?: 19
+        versionName = ciVersionName ?: "0.1.20260926"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Integration test credentials from .env (dynamic, not in code)
