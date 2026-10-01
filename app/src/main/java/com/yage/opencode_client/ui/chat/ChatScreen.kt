@@ -336,9 +336,22 @@ fun ChatScreen(
             }
 
         if (state.currentSessionId != null) {
+            ComposerStatusBar(
+                stats = state.sessionStats,
+                isBusy = currentSessionIsRunning,
+                agentActivityText = currentActivity?.text,
+                agentStartedAtMillis = currentActivity?.startedAtMillis,
+                isRecording = state.isRecording,
+                isTranscribing = state.isTranscribing,
+                hasPreservedSpeechAudio = state.hasPreservedSpeechAudio,
+                isRetryingSpeech = state.isRetryingSpeech,
+                onAbort = { viewModel.abortSession() }
+            )
+        }
+
+        if (state.currentSessionId != null) {
             ChatInputBar(
                 text = state.inputText,
-                isBusy = currentSessionIsRunning,
                 isSending = state.currentSessionId?.let { it in state.sendingSessionIds } == true,
                 isRecording = state.isRecording,
                 isTranscribing = state.isTranscribing,
@@ -346,14 +359,11 @@ fun ChatScreen(
                 isRetryingSpeech = state.isRetryingSpeech,
                 speechAudioLevel = state.speechAudioLevel,
                 isSpeechConfigured = state.aiBuilderConnectionOK && aiBuilderToken.isNotEmpty(),
-                agentActivityText = currentActivity?.text,
-                agentStartedAtMillis = currentActivity?.startedAtMillis,
                 imageAttachments = state.imageAttachments,
                 onTextChange = viewModel::setInputText,
                 onSend = { viewModel.sendMessage() },
                 onAddImages = { imagePickerLauncher.launch("image/*") },
                 onRemoveImage = viewModel::removeImageAttachment,
-                onAbort = { viewModel.abortSession() },
                 onAbortSpeech = { viewModel.abortSpeechRecognition() },
                 onRetrySpeech = { viewModel.retryPreservedSpeechAudio() },
                 onDiscardSpeech = { viewModel.discardPreservedSpeechAudio() },
