@@ -166,6 +166,32 @@ fun ChatScreen(
         )
     }
 
+    // Stopwatch end: while the latest turn runs it is null (follows now), once
+    // it stops it freezes at that turn's completion instant. Match by the
+    // latest user message id so a just-sent prompt reads as running from zero
+    // rather than briefly flashing the previous turn's value. If the session
+    // is idle but the latest turn has no completed activity (aborted/errored
+    // before any assistant output), freeze at the turn's own start so the
+    // reading holds at 00:00 instead of ticking forever.
+    val turnStopwatchEndMillis = remember(
+        state.currentSessionId,
+        state.visibleMessages,
+        currentSessionIsRunning,
+        completedTurnActivities,
+    ) {
+        val lastUser = state.currentSessionId?.let { sid ->
+            state.visibleMessages.lastOrNull { it.info.sessionId == sid && it.info.isUser }
+        }
+        val completedEnd = completedTurnActivities.lastOrNull()
+            ?.takeIf { it.id == lastUser?.info?.id }
+            ?.endedAtMillis
+        turnStopwatchFrozenEnd(
+            completedTurnEndMillis = completedEnd,
+            isRunning = currentSessionIsRunning,
+            lastUserCreatedMillis = lastUser?.info?.time?.created,
+        )
+    }
+
     val validDockedRequest = dockedPreviewRequest?.takeIf {
         it.belongsTo(state.currentHostProfileId, state.currentSessionId, state.currentSession?.directory)
     }
@@ -205,6 +231,7 @@ fun ChatScreen(
                 currentSessionId = state.currentSessionId,
                 sessionStatuses = state.sessionStatuses,
                 attentionSessionIds = state.attentionSessionIds,
+                descendantBusyCounts = state.sessionDescendantBusyCounts,
                 hasMoreSessions = state.hasMoreSessions,
                 isLoadingMoreSessions = state.isLoadingMoreSessions,
                 isRefreshingSessions = state.isRefreshingSessions,
@@ -336,11 +363,23 @@ fun ChatScreen(
             }
 
         if (state.currentSessionId != null) {
+            val backgroundSubagents = state.runningBackgroundSubagents
             ComposerStatusBar(
                 stats = state.sessionStats,
                 isBusy = currentSessionIsRunning,
                 agentActivityText = currentActivity?.text,
-                agentStartedAtMillis = currentActivity?.startedAtMillis,
+                backgroundTaskLabel = when {
+                    backgroundSubagents.isEmpty() -> null
+                    backgroundSubagents.size == 1 && backgroundSubagents.first().displayName.isNotBlank() ->
+                        backgroundSubagents.first().displayName
+                    backgroundSubagents.size == 1 -> stringResource(R.string.chat_background_tasks_one)
+                    else -> stringResource(R.string.chat_background_tasks_many, backgroundSubagents.size)
+                },
+                onOpenBackgroundTask = {
+                    backgroundSubagents.firstOrNull()?.let { viewModel.openChildSession(it.id) }
+                },
+                stopwatchStartedAtMillis = currentActivity?.startedAtMillis,
+                stopwatchEndedAtMillis = turnStopwatchEndMillis,
                 isRecording = state.isRecording,
                 isTranscribing = state.isTranscribing,
                 hasPreservedSpeechAudio = state.hasPreservedSpeechAudio,
