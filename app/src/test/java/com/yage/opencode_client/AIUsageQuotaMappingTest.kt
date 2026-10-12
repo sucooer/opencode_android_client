@@ -4,7 +4,12 @@ import com.yage.opencode_client.data.model.AIUsageQuota
 import com.yage.opencode_client.data.model.AIUsageQuotaKey
 import com.yage.opencode_client.data.model.AIUsageQuotaSnapshot
 import com.yage.opencode_client.data.model.ModelShortlistItem
+import com.yage.opencode_client.data.model.QUOTA_STALE_AFTER_MS
+import com.yage.opencode_client.data.model.QuotaFetchResult
+import com.yage.opencode_client.data.model.applyQuotaFetchResult
 import com.yage.opencode_client.data.model.isQuotaSnapshotStale
+import com.yage.opencode_client.data.model.isQuotaStale
+import com.yage.opencode_client.data.model.mergeQuotaSnapshot
 import com.yage.opencode_client.data.model.primaryQuotaKey
 import com.yage.opencode_client.data.model.resolveQuota
 import com.yage.opencode_client.ui.AppState
@@ -13,6 +18,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 
 class AIUsageQuotaMappingTest {
     @Test
@@ -78,5 +86,335 @@ class AIUsageQuotaMappingTest {
         )
 
         assertTrue(state.isSelectedModelQuotaStale)
+    }
+
+    @Test
+    fun `offset observed_at parses to epoch millis and ignores the offset display`() {
+        val pacific = quota(observedAtIso = OBSERVED_ISO)
+        val utc = quota(observedAtIso = "2026-10-10T15:49:11.527738Z")
+        assertEquals(OBSERVED_EPOCH_MS, pacific.observedAtMs)
+        assertEquals(OBSERVED_EPOCH_MS, utc.observedAtMs)
+        assertNull(quota(observedAtIso = "not-a-timestamp").observedAtMs)
+        assertNull(quota(observedAtIso = "2026-10-10T08:49:11").observedAtMs)
+    }
+
+    @Test
+    fun `fresh fetch of a two hour old observation is stale`() {
+        val now = OBSERVED_EPOCH_MS + TWO_HOURS_MS
+        assertTrue(isQuotaStale(quota(observedAtIso = OBSERVED_ISO), snapshot(now), now, hasError = false))
+    }
+
+    @Test
+    fun `fresh observation is not stale even when the fetch timestamp is old`() {
+        val now = OBSERVED_EPOCH_MS + 60_000L
+        val fetchedTwoHoursAgo = now - TWO_HOURS_MS
+        assertFalse(
+            isQuotaStale(
+                quota(observedAtIso = OBSERVED_ISO),
+                snapshot(fetchedTwoHoursAgo, generatedAt = "1999-01-01T00:00:00"),
+                now,
+                hasError = false
+            )
+        )
+    }
+
+    @Test
+    fun `missing observed_at falls back to fetchedAtMs`() {
+        val now = OBSERVED_EPOCH_MS
+        assertFalse(isQuotaStale(quota(), snapshot(now), now, hasError = false))
+        assertTrue(isQuotaStale(quota(), snapshot(now - TWO_HOURS_MS), now, hasError = false))
+        assertFalse(isQuotaStale(quota(), snapshot(now - QUOTA_STALE_AFTER_MS), now, hasError = false))
+        assertTrue(isQuotaStale(quota(), snapshot(now - QUOTA_STALE_AFTER_MS - 1), now, hasError = false))
+        assertTrue(isQuotaStale(quota(observedAtIso = OBSERVED_ISO), snapshot(now), now, hasError = true))
+    }
+
+    @Test
+    fun `unparseable observed_at falls back to fetchedAtMs`() {
+        val now = OBSERVED_EPOCH_MS
+        val broken = quota(observedAtIso = "not-a-timestamp")
+        assertFalse(isQuotaStale(broken, snapshot(now), now, hasError = false))
+        assertTrue(isQuotaStale(broken, snapshot(now - TWO_HOURS_MS), now, hasError = false))
+    }
+
+    @Test
+    fun `measurement source does not override observation age`() {
+        val now = OBSERVED_EPOCH_MS + TWO_HOURS_MS
+        val freshNow = OBSERVED_EPOCH_MS + 60_000L
+        assertTrue(
+            isQuotaStale(
+                quota(observedAtIso = OBSERVED_ISO, measurementSource = "cache"),
+                snapshot(now),
+                now,
+                hasError = false
+            )
+        )
+        assertFalse(
+            isQuotaStale(
+                quota(observedAtIso = OBSERVED_ISO, measurementSource = "live"),
+                snapshot(freshNow - TWO_HOURS_MS),
+                freshNow,
+                hasError = false
+            )
+        )
+        assertFalse(
+            isQuotaStale(
+                quota(observedAtIso = OBSERVED_ISO, measurementSource = "cache"),
+                snapshot(freshNow - TWO_HOURS_MS),
+                freshNow,
+                hasError = false
+            )
+        )
+    }
+
+    @Test
+    fun `selected model quota stale follows observation time not fetch time`() {
+        val now = System.currentTimeMillis()
+        val oldObservation = offsetIso(now - TWO_HOURS_MS)
+        val freshObservation = offsetIso(now - 1_000L)
+        val selected = AppState(
+            selectedModelIndex = 0,
+            modelShortlist = listOf(ModelShortlistItem("openai", "gpt-5", "GPT", "GPT")),
+            aiUsageQuotaSnapshot = AIUsageQuotaSnapshot(
+                generatedAt = "2099-01-01T00:00:00",
+                fetchedAtMs = now,
+                quotas = listOf(quota(observedAtIso = oldObservation, measurementSource = "cache"))
+            )
+        )
+        val freshObservationOldFetch = selected.copy(
+            aiUsageQuotaSnapshot = AIUsageQuotaSnapshot(
+                generatedAt = "1999-01-01T00:00:00",
+                fetchedAtMs = now - TWO_HOURS_MS,
+                quotas = listOf(quota(observedAtIso = freshObservation, measurementSource = "live"))
+            )
+        )
+
+        assertTrue(selected.isSelectedModelQuotaStale)
+        assertFalse(freshObservationOldFetch.isSelectedModelQuotaStale)
+    }
+
+    @Test
+    fun `no selected quota falls back to snapshot freshness`() {
+        val now = System.currentTimeMillis()
+        val staleFetch = AppState(
+            aiUsageQuotaSnapshot = AIUsageQuotaSnapshot(null, now - TWO_HOURS_MS, emptyList())
+        )
+        val freshFetch = AppState(
+            aiUsageQuotaSnapshot = AIUsageQuotaSnapshot(null, now, emptyList())
+        )
+
+        assertTrue(staleFetch.isSelectedModelQuotaStale)
+        assertFalse(freshFetch.isSelectedModelQuotaStale)
+    }
+
+    @Test
+    fun `failed key keeps the previous window instead of a fresh sibling`() {
+        val now = System.currentTimeMillis()
+        val oldWeekly = AIUsageQuota(
+            provider = "grok",
+            label = "Weekly",
+            usedPercentage = 40,
+            remainingPercentage = 60,
+            observedAtIso = offsetIso(now - TWO_HOURS_MS)
+        )
+        val newCodex = AIUsageQuota(
+            provider = "codex",
+            label = "5h",
+            usedPercentage = 10,
+            remainingPercentage = 90,
+            observedAtIso = offsetIso(now - 1_000)
+        )
+        val freshSevenDay = AIUsageQuota(
+            provider = "grok",
+            label = "7d",
+            usedPercentage = 5,
+            remainingPercentage = 95,
+            observedAtIso = offsetIso(now - 1_000)
+        )
+        val previous = AIUsageQuotaSnapshot(
+            generatedAt = "old",
+            fetchedAtMs = now - TWO_HOURS_MS,
+            quotas = listOf(oldWeekly)
+        )
+        val incoming = AIUsageQuotaSnapshot(
+            generatedAt = "new",
+            fetchedAtMs = now,
+            quotas = listOf(newCodex, freshSevenDay),
+            failedKeys = setOf(AIUsageQuotaKey("grok", "Weekly"))
+        )
+
+        val applied = applyQuotaFetchResult(previous, Result.success(QuotaFetchResult(incoming, incoming.failedKeys)))
+        val merged = applied.snapshot!!
+
+        assertNull(applied.error)
+        assertEquals(oldWeekly, merged.quotas.single { it.provider == "grok" && it.label == "Weekly" })
+        assertEquals(newCodex, merged.quotas.single { it.provider == "codex" })
+        assertTrue(isQuotaStale(oldWeekly, merged, now, hasError = false))
+        assertFalse(isQuotaStale(newCodex, merged, now, hasError = false))
+        assertEquals(oldWeekly, resolveQuota(merged.quotas, AIUsageQuotaKey("grok", "Weekly")))
+        val selected = AppState(
+            selectedModelIndex = 0,
+            modelShortlist = listOf(ModelShortlistItem("xai", "grok-4.7", "Grok", "Grok")),
+            aiUsageQuotaSnapshot = merged
+        )
+        assertEquals(oldWeekly, selected.selectedAIUsageQuota)
+        assertTrue(selected.isSelectedModelQuotaStale)
+    }
+
+    @Test
+    fun `failed key with no previous value stays unavailable`() {
+        val now = System.currentTimeMillis()
+        val newCodex = AIUsageQuota("codex", "5h", 10, 90, observedAtIso = offsetIso(now - 1_000))
+        val previous = AIUsageQuotaSnapshot("old", now - 1_000, listOf(newCodex))
+        val incoming = AIUsageQuotaSnapshot(
+            generatedAt = "new",
+            fetchedAtMs = now,
+            quotas = listOf(newCodex),
+            failedKeys = setOf(AIUsageQuotaKey("grok", "Weekly"))
+        )
+
+        val merged = mergeQuotaSnapshot(previous, incoming)
+
+        assertNull(resolveQuota(merged.quotas, AIUsageQuotaKey("grok", "Weekly")))
+        assertTrue(merged.quotas.none { it.provider.equals("grok", ignoreCase = true) })
+        assertEquals(90, merged.quotas.single().remainingPercentage)
+    }
+
+    @Test
+    fun `fatal fetch keeps the previous snapshot and marks the selected quota stale`() {
+        val now = System.currentTimeMillis()
+        val previous = snapshot(now, quotas = listOf(quota(observedAtIso = offsetIso(now - 1_000))))
+        val applied = applyQuotaFetchResult(
+            previous,
+            Result.failure(IllegalStateException("AI Usage Dashboard returned HTTP 500"))
+        )
+
+        assertEquals(previous, applied.snapshot)
+        assertEquals("AI Usage Dashboard returned HTTP 500", applied.error)
+        val state = AppState(
+            selectedModelIndex = 0,
+            modelShortlist = listOf(ModelShortlistItem("openai", "gpt-5", "GPT", "GPT")),
+            aiUsageError = applied.error,
+            aiUsageQuotaSnapshot = applied.snapshot
+        )
+        assertTrue(state.isSelectedModelQuotaStale)
+    }
+
+    @Test
+    fun `failed preferred window is stale when resolution falls back to another window`() {
+        val now = System.currentTimeMillis()
+        val sevenDay = AIUsageQuota(
+            provider = "codex",
+            label = "7d",
+            usedPercentage = 12,
+            remainingPercentage = 88,
+            observedAtIso = offsetIso(now - 1_000)
+        )
+        val impersonating = AppState(
+            selectedModelIndex = 0,
+            modelShortlist = listOf(ModelShortlistItem("openai", "gpt-5", "GPT", "GPT")),
+            aiUsageQuotaSnapshot = AIUsageQuotaSnapshot(
+                generatedAt = "new",
+                fetchedAtMs = now,
+                quotas = listOf(sevenDay),
+                failedKeys = setOf(AIUsageQuotaKey("codex", "5h"))
+            )
+        )
+        val complementary = impersonating.copy(
+            aiUsageQuotaSnapshot = impersonating.aiUsageQuotaSnapshot?.copy(failedKeys = emptySet())
+        )
+
+        assertEquals("7d", impersonating.selectedAIUsageQuota?.label)
+        assertTrue(impersonating.isSelectedModelQuotaStale)
+        assertEquals("7d", complementary.selectedAIUsageQuota?.label)
+        assertFalse(complementary.isSelectedModelQuotaStale)
+    }
+
+    @Test
+    fun `retained failed quota stays stale when its observation would otherwise look fresh`() {
+        val now = System.currentTimeMillis()
+        val sibling = AIUsageQuota("codex", "5h", 10, 90, observedAtIso = offsetIso(now - 1_000))
+        val retainedCases = listOf(
+            AIUsageQuota("grok", "Weekly", 40, 60),
+            AIUsageQuota("grok", "Weekly", 40, 60, observedAtIso = "not-a-timestamp"),
+            AIUsageQuota("grok", "Weekly", 40, 60, observedAtIso = offsetIso(now - 60_000))
+        )
+
+        for (oldWeekly in retainedCases) {
+            val merged = mergeQuotaSnapshot(
+                previous = AIUsageQuotaSnapshot("old", now - TWO_HOURS_MS, listOf(oldWeekly)),
+                incoming = AIUsageQuotaSnapshot(
+                    generatedAt = "new",
+                    fetchedAtMs = now,
+                    quotas = listOf(sibling),
+                    failedKeys = setOf(AIUsageQuotaKey("grok", "Weekly"))
+                )
+            )
+            val retained = merged.quotas.single { it.label == "Weekly" }
+            assertEquals(60, retained.remainingPercentage)
+            assertEquals(oldWeekly.observedAtIso, retained.observedAtIso)
+            assertTrue(isQuotaStale(retained, merged, now, hasError = false))
+            assertFalse(isQuotaStale(sibling, merged, now, hasError = false))
+
+            val failedSelection = AppState(
+                selectedModelIndex = 0,
+                modelShortlist = listOf(ModelShortlistItem("xai", "grok-4.7", "Grok", "Grok")),
+                aiUsageQuotaSnapshot = merged
+            )
+            val healthySelection = failedSelection.copy(
+                modelShortlist = listOf(ModelShortlistItem("openai", "gpt-5", "GPT", "GPT"))
+            )
+            assertEquals(retained, failedSelection.selectedAIUsageQuota)
+            assertTrue(failedSelection.isSelectedModelQuotaStale)
+            assertEquals(sibling, healthySelection.selectedAIUsageQuota)
+            assertFalse(healthySelection.isSelectedModelQuotaStale)
+        }
+    }
+
+    @Test
+    fun `case variant failed keys retain a single previous quota`() {
+        val now = System.currentTimeMillis()
+        val oldWeekly = AIUsageQuota("grok", "Weekly", 40, 60, observedAtIso = offsetIso(now - TWO_HOURS_MS))
+        val merged = mergeQuotaSnapshot(
+            previous = AIUsageQuotaSnapshot("old", now - TWO_HOURS_MS, listOf(oldWeekly)),
+            incoming = AIUsageQuotaSnapshot(
+                generatedAt = "new",
+                fetchedAtMs = now,
+                quotas = emptyList(),
+                failedKeys = setOf(
+                    AIUsageQuotaKey("grok", "Weekly"),
+                    AIUsageQuotaKey("GROK", "weekly")
+                )
+            )
+        )
+
+        assertEquals(listOf(oldWeekly), merged.quotas)
+        assertEquals(1, merged.failedKeys.size)
+    }
+
+    private fun quota(
+        observedAtIso: String? = null,
+        measurementSource: String? = null
+    ) = AIUsageQuota(
+        provider = "codex",
+        label = "5h",
+        usedPercentage = 29,
+        remainingPercentage = 71,
+        observedAtIso = observedAtIso,
+        measurementSource = measurementSource
+    )
+
+    private fun snapshot(
+        fetchedAtMs: Long,
+        generatedAt: String? = "2026-10-10T15:49:12",
+        quotas: List<AIUsageQuota> = listOf(quota())
+    ) = AIUsageQuotaSnapshot(generatedAt, fetchedAtMs, quotas)
+
+    private fun offsetIso(epochMs: Long): String =
+        OffsetDateTime.ofInstant(Instant.ofEpochMilli(epochMs), ZoneOffset.ofHours(-7)).toString()
+
+    private companion object {
+        const val OBSERVED_ISO = "2026-10-10T08:49:11.527738-07:00"
+        const val OBSERVED_EPOCH_MS = 1_791_647_351_527L
+        const val TWO_HOURS_MS = 2 * 3_600_000L
     }
 }
