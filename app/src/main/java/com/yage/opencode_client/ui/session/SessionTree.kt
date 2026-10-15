@@ -8,6 +8,120 @@ data class SessionNode(
     val children: List<SessionNode>
 )
 
+enum class SessionIndicator { NEEDS_YOU, FAILED, RUNNING, UNREAD }
+
+fun settled(status: SessionStatus?): Boolean = status?.isIdle == true
+
+fun unreadCountsBySession(
+    sessions: List<Session>,
+    statuses: Map<String, SessionStatus>,
+    lastViewedAt: Map<String, Long>
+): Map<String, Int> = blueReminderSourcesBySession(sessions, statuses, lastViewedAt).mapValues { it.value.size }
+
+/** Filter unread sources first, then independently acknowledge each row on the ancestor chain. */
+fun blueReminderSourcesBySession(
+    sessions: List<Session>,
+    statuses: Map<String, SessionStatus>,
+    lastViewedAt: Map<String, Long>,
+    acknowledgements: Map<String, Map<String, Long>> = emptyMap()
+): Map<String, Map<String, Long>> {
+    val sessionsById = sessions.associateBy { it.id }
+    val sources = mutableMapOf<String, MutableMap<String, Long>>()
+    sessions.forEach { source ->
+        val version = source.time?.updated ?: return@forEach
+        if (version <= 0 || !settled(statuses[source.id]) ||
+            version <= (lastViewedAt[source.id] ?: Long.MIN_VALUE)) return@forEach
+        var rowId: String? = source.id
+        val visited = mutableSetOf<String>()
+        while (rowId != null && visited.add(rowId)) {
+            if (rowId == source.id || acknowledgements[rowId]?.get(source.id) != version) {
+                sources.getOrPut(rowId) { mutableMapOf() }[source.id] = version
+            }
+            // Acknowledging a parent must not acknowledge its ancestors.
+            rowId = sessionsById[rowId]?.parentId
+        }
+    }
+    return sources
+}
+
+fun failureCountsBySession(
+    sessions: List<Session>,
+    failedAt: Map<String, Long>,
+    lastViewedAt: Map<String, Long>
+): Map<String, Int> = indicatorCountsBySession(sessions, failedAt, lastViewedAt)
+
+private fun indicatorCountsBySession(
+    sessions: List<Session>,
+    sourceTimes: Map<String, Long>,
+    lastViewedAt: Map<String, Long>
+): Map<String, Int> {
+    val sessionsById = sessions.associateBy { it.id }
+    val counts = mutableMapOf<String, Int>()
+    sourceTimes.forEach { (sourceId, time) ->
+        if (time <= 0 || time <= (lastViewedAt[sourceId] ?: Long.MIN_VALUE)) return@forEach
+        var sessionId: String? = sourceId
+        val visited = mutableSetOf<String>()
+        while (sessionId != null && visited.add(sessionId)) {
+            counts[sessionId] = counts.getOrDefault(sessionId, 0) + 1
+            sessionId = sessionsById[sessionId]?.parentId
+        }
+    }
+    return counts
+}
+
+fun rowIndicator(
+    session: Session,
+    status: SessionStatus?,
+    isCurrent: Boolean,
+    attentionCount: Int,
+    unreadCount: Int,
+    failureCount: Int,
+    descendantActiveCount: Int = 0,
+    unknown: Boolean = status == null
+): SessionIndicator? = when {
+    session.isArchived -> null
+    attentionCount > 0 -> SessionIndicator.NEEDS_YOU
+    failureCount > 0 -> SessionIndicator.FAILED
+    status?.isBusy == true || status?.isRetry == true || descendantActiveCount > 0 -> SessionIndicator.RUNNING
+    unknown || !settled(status) || isCurrent -> null
+    unreadCount > 0 -> SessionIndicator.UNREAD
+    else -> null
+}
+
+data class SessionPresentation(
+    val indicator: SessionIndicator?,
+    val ownStatus: SessionStatus?,
+    val activeDescendants: Int,
+    val unknown: Boolean,
+    val blueReminderSources: Map<String, Long> = emptyMap()
+)
+
+/** All facts are calculated once per state change, never in an animated row. */
+fun sessionPresentations(
+    sessions: List<Session>, statuses: Map<String, SessionStatus>,
+    known: Set<String>, snapshotKnown: Boolean, connected: Boolean,
+    viewed: Map<String, Long>, failed: Map<String, Long>, attentionIds: List<String>, current: String?,
+    acknowledgements: Map<String, Map<String, Long>> = emptyMap()
+): Map<String, SessionPresentation> {
+    val effective = sessions.associate { s ->
+        s.id to if (connected && (snapshotKnown || s.id in known)) statuses[s.id] ?: SessionStatus("idle")
+        else SessionStatus("unknown")
+    }
+    val unknownCounts = attentionCountsBySession(sessions, effective.filterValues { !it.isIdle && !it.isBusy && !it.isRetry }.keys.toList())
+    val active = descendantBusyCountsBySession(sessions, effective)
+    val sources = blueReminderSourcesBySession(sessions, effective, viewed, acknowledgements)
+    val failures = failureCountsBySession(sessions, failed, viewed)
+    val attention = attentionCountsBySession(sessions, attentionIds)
+    return sessions.associate { s ->
+        val status = effective[s.id]
+        val unknown = unknownCounts.getOrDefault(s.id, 0) > 0
+        val descendants = active.getOrDefault(s.id, 0)
+        s.id to SessionPresentation(rowIndicator(s, status, s.id == current,
+            attention.getOrDefault(s.id, 0), sources[s.id].orEmpty().size, failures.getOrDefault(s.id, 0),
+            descendants, unknown), status, descendants, unknown, sources[s.id].orEmpty())
+    }
+}
+
 fun attentionCountsBySession(
     sessions: List<Session>,
     attentionSessionIds: List<String>

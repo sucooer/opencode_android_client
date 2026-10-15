@@ -1,6 +1,7 @@
 package com.yage.opencode_client
 
 import android.util.Log
+import com.yage.opencode_client.data.api.SSEClient
 import com.yage.opencode_client.data.model.AgentInfo
 import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.MessageWithParts
@@ -33,6 +34,7 @@ import com.yage.opencode_client.ui.encodeShortlist
 import com.yage.opencode_client.ui.seedShortlistFromPresets
 import com.yage.opencode_client.ui.session.buildSessionTree
 import com.yage.opencode_client.util.SettingsManager
+import com.yage.opencode_client.util.SessionReadStateStore
 import com.yage.opencode_client.util.ThemeMode
 import com.yage.voiceflowkit.VoiceFlowClient
 import com.yage.voiceflowkit.VoiceFlowMicrophone
@@ -69,6 +71,10 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import okhttp3.OkHttpClient
+import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
+import okhttp3.sse.EventSources
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -99,6 +105,7 @@ class MainViewModelTest {
         mockkStatic(Log::class)
         every { Log.d(any<String>(), any<String>()) } returns 0
         every { Log.w(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>(), any<Throwable>()) } returns 0
         every { Log.e(any<String>(), any<String>()) } returns 0
         every { Log.e(any<String>(), any<String>(), any<Throwable>()) } returns 0
 
@@ -110,7 +117,7 @@ class MainViewModelTest {
         tunnelManager = mockk(relaxed = true)
         sshKeyManager = mockk(relaxed = true)
 
-        val defaultProfile = HostProfile.defaultDirect("http://server.test")
+        val defaultProfile = HostProfile.defaultDirect("http://server.test").copy(id = "test-host")
         every { hostProfileStore.currentProfile() } returns defaultProfile
         every { hostProfileStore.profiles() } returns listOf(defaultProfile)
 
@@ -151,17 +158,412 @@ class MainViewModelTest {
         every { settingsManager.getAgentForSession(any()) } returns null
         every { settingsManager.setAgentForSession(any(), any()) } just runs
 
-        every { repository.connectSSE(any()) } returns emptyFlow()
+        every { repository.connectSSE(any(), any()) } returns emptyFlow()
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        coEvery { repository.getSessionStatusInDirectory(any()) } coAnswers { repository.getSessionStatus() }
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
+        coEvery { repository.getPendingQuestions() } returns Result.success(emptyList())
         coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())
         coEvery { repository.getProviderRegistry() } returns Result.success(ProviderRegistryResponse())
     }
 
-    private fun createViewModel(): MainViewModel {
-        return MainViewModel(repository, settingsManager, voiceFlowClient, microphone, hostProfileStore, tunnelManager, sshKeyManager, testSessionStatsStore())
+    private fun createViewModel(readStateStore: SessionReadStateStore = testSessionReadStateStore()): MainViewModel {
+        return MainViewModel(repository, settingsManager, voiceFlowClient, microphone, hostProfileStore, tunnelManager, sshKeyManager, testSessionStatsStore(), readStateStore)
+    }
+
+    private fun indicatorEvent(sessionId: String, status: String? = null) = SSEEvent(
+        payload = SSEPayload(
+            type = if (status == null) "session.error" else "session.status",
+            properties = buildJsonObject {
+                put("sessionID", JsonPrimitive(sessionId))
+                if (status != null) put("status", buildJsonObject { put("type", JsonPrimitive(status)) })
+            }
+        )
+    )
+
+    @Test
+    fun `indicator errors settle only after idle and successful turns retain unviewed failure`() = runTest {
+        val store = testSessionReadStateStore()
+        val viewModel = createViewModel(store)
+        updateState(viewModel) { it.copy(currentSessionId = "current") }
+        handleSse(viewModel, indicatorEvent("other"))
+        assertNotNull(viewModel.state.value.pendingSessionErrorAt["other"])
+        assertNull(store.failedAt("other"))
+        handleSse(viewModel, indicatorEvent("other", "retry"))
+        assertTrue(viewModel.state.value.pendingSessionErrorAt.isEmpty())
+        handleSse(viewModel, indicatorEvent("other", "idle"))
+        assertNull(store.failedAt("other"))
+        handleSse(viewModel, indicatorEvent("other"))
+        val errorAt = viewModel.state.value.pendingSessionErrorAt["other"]
+        handleSse(viewModel, indicatorEvent("other", "idle"))
+        assertEquals(errorAt, store.failedAt("other"))
+        assertEquals(errorAt, viewModel.state.value.sessionReadStates["other"]?.failedAt)
+        assertTrue(viewModel.state.value.pendingSessionErrorAt.isEmpty())
+        // Idle snapshots alone must not clear a previously recorded failure.
+        handleSse(viewModel, indicatorEvent("other", "idle"))
+        assertEquals(errorAt, store.failedAt("other"))
+        handleSse(viewModel, indicatorEvent("other", "busy"))
+        handleSse(viewModel, indicatorEvent("other", "idle"))
+        assertEquals(errorAt, store.failedAt("other"))
+        store.markViewed("other", errorAt!!)
+        handleSse(viewModel, indicatorEvent("other", "retry"))
+        handleSse(viewModel, indicatorEvent("other", "idle"))
+        assertNull(store.failedAt("other"))
+        assertNull(viewModel.state.value.sessionReadStates["other"]?.failedAt)
+    }
+
+    @Test
+    fun `status poll settles missing active sessions and preserves failures on idle snapshots`() = runTest {
+        val store = testSessionReadStateStore()
+        store.markFailed("snapshot", 10L)
+        store.markFailed("success", 20L)
+        val viewModel = createViewModel(store)
+        updateState(viewModel) {
+            it.copy(sessions = listOf("failed", "success", "snapshot").map { id -> Session(id, directory = "/test") },
+                sessionStatuses = mapOf("failed" to SessionStatus("retry"), "success" to SessionStatus("busy")))
+        }
+        handleSse(viewModel, indicatorEvent("failed"))
+        val errorAt = viewModel.state.value.pendingSessionErrorAt["failed"]
+        coEvery { repository.getSessionStatus() } returns Result.success(mapOf("snapshot" to SessionStatus("idle")))
+        invokePrivateNoArgs(viewModel, "loadSessionStatus")
+        advanceUntilIdle()
+        assertEquals(errorAt, store.failedAt("failed"))
+        assertEquals(20L, store.failedAt("success"))
+        assertEquals(10L, store.failedAt("snapshot"))
+        assertTrue(viewModel.state.value.sessionStatuses["failed"]!!.isIdle)
+        assertTrue(viewModel.state.value.sessionStatuses["success"]!!.isIdle)
+        assertTrue(viewModel.state.value.pendingSessionErrorAt.isEmpty())
+    }
+
+    @Test
+    fun `cold restore preserves read timestamps but selecting marks outgoing and incoming viewed`() = runTest {
+        val store = testSessionReadStateStore()
+        store.markViewed("old", 10L)
+        store.markFailed("old", 20L)
+        every { settingsManager.currentSessionId } returns "old"
+        val viewModel = createViewModel(store)
+        assertEquals("old", viewModel.state.value.currentSessionId)
+        assertEquals(10L, viewModel.state.value.sessionReadStates["old"]?.lastViewedAt)
+        viewModel.selectSession("new")
+        advanceUntilIdle()
+        assertTrue(store.lastViewedAt("old")!! > 20L)
+        assertEquals(store.lastViewedAt("old"), store.lastViewedAt("new"))
+        assertEquals(store.all(), viewModel.state.value.sessionReadStates)
+    }
+
+    @Test
+    fun `deleting current session removes read state after selecting replacement`() = runTest {
+        val store = testSessionReadStateStore()
+        store.markFailed("old", 10L)
+        val viewModel = createViewModel(store)
+        updateState(viewModel) { it.copy(currentSessionId = "old", sessions = listOf(
+            Session("old", directory = "/tmp"), Session("new", directory = "/tmp")
+        ), pendingSessionErrorAt = mapOf("old" to 20L)) }
+        coEvery { repository.deleteSession("old") } returns Result.success(Unit)
+        viewModel.deleteSession("old")
+        advanceUntilIdle()
+        assertEquals("new", viewModel.state.value.currentSessionId)
+        assertFalse(store.all().containsKey("old"))
+        assertFalse(viewModel.state.value.pendingSessionErrorAt.containsKey("old"))
+        assertEquals(store.all(), viewModel.state.value.sessionReadStates)
+    }
+
+    @Test
+    fun `restoring session selects it and marks it viewed`() = runTest {
+        val store = testSessionReadStateStore()
+        val viewModel = createViewModel(store)
+        val restored = Session("restored", directory = "/tmp")
+        updateState(viewModel) { it.copy(sessions = listOf(restored.copy(time = Session.TimeInfo(archived = 1L)))) }
+        coEvery { repository.updateSessionArchived("restored", any()) } returns Result.success(restored)
+        viewModel.restoreSession("restored")
+        advanceUntilIdle()
+        assertEquals("restored", viewModel.state.value.currentSessionId)
+        assertNotNull(store.lastViewedAt("restored"))
+        assertEquals(store.all(), viewModel.state.value.sessionReadStates)
+    }
+
+    @Test
+    fun `SSE disconnect and host switch discard tentative errors`() = runTest {
+        val listener = slot<EventSourceListener>()
+        val source = mockk<EventSource>(relaxed = true)
+        val factory = mockk<EventSource.Factory>()
+        mockkStatic(EventSources::class)
+        every { EventSources.createFactory(any()) } returns factory
+        every { factory.newEventSource(any(), capture(listener)) } returns source
+        val client = SSEClient(OkHttpClient())
+        every { repository.connectSSE(any(), any()) } answers {
+            client.connect("http://server.test", onConnected = firstArg(), onDisconnected = secondArg())
+        }
+        val store = testSessionReadStateStore()
+        val viewModel = createViewModel(store)
+        updateState(viewModel) { it.copy(sessions = listOf(Session("other", directory = "/test")), sessionStatuses = mapOf("other" to SessionStatus("busy"))) }
+        invokePrivateNoArgs(viewModel, "startSSE")
+        runCurrent()
+        listener.captured.onEvent(source, null, null,
+            """{"payload":{"type":"session.error","properties":{"sessionID":"other"}}}""")
+        runCurrent()
+        assertNotNull(viewModel.state.value.pendingSessionErrorAt["other"])
+
+        listener.captured.onFailure(source, IllegalStateException("disconnected"), null)
+        runCurrent()
+        assertTrue(viewModel.state.value.pendingSessionErrorAt.isEmpty())
+        // Poll while the real SSEClient retry loop is still in its 1s backoff.
+        invokePrivateNoArgs(viewModel, "loadSessionStatus")
+        runCurrent()
+        assertNull(store.failedAt("other"))
+        assertTrue(viewModel.state.value.sessionStatuses["other"]!!.isIdle)
+        advanceTimeBy(999)
+        runCurrent()
+        verify(exactly = 1) { factory.newEventSource(any(), any()) }
+        handleSse(viewModel, indicatorEvent("other"))
+        invokePrivateNoArgs(viewModel, "resetRuntimeForHostSwitch")
+        runCurrent()
+        assertTrue(viewModel.state.value.pendingSessionErrorAt.isEmpty())
+    }
+
+    @Test
+    fun `init and active host refresh publish only that hosts read state`() = runTest {
+        val store = testSessionReadStateStore()
+        store.markViewed("shared", 10L)
+        store.selectHost("other-host")
+        store.markFailed("shared", 20L)
+        val viewModel = createViewModel(store)
+        assertEquals(10L, viewModel.state.value.sessionReadStates["shared"]?.lastViewedAt)
+        assertNull(viewModel.state.value.sessionReadStates["shared"]?.failedAt)
+        every { hostProfileStore.currentProfile() } returns
+            HostProfile.defaultDirect("http://other.test").copy(id = "other-host")
+        invokePrivateNoArgs(viewModel, "refreshHostProfileState")
+        assertEquals("other-host", viewModel.state.value.currentHostProfileId)
+        assertNull(viewModel.state.value.sessionReadStates["shared"]?.lastViewedAt)
+        assertEquals(20L, viewModel.state.value.sessionReadStates["shared"]?.failedAt)
+    }
+
+    private fun reminderTree(store: SessionReadStateStore): MainViewModel {
+        val vm = createViewModel(store)
+        val sessions = listOf(
+            Session("g", directory = "/test", time = Session.TimeInfo(updated = 0)),
+            Session("p", directory = "/test", parentId = "g", time = Session.TimeInfo(updated = 0)),
+            Session("c", directory = "/test", parentId = "p", time = Session.TimeInfo(updated = 100)),
+            Session("d", directory = "/test", parentId = "p", time = Session.TimeInfo(updated = 200)),
+            Session("x", directory = "/test", time = Session.TimeInfo(updated = 0)))
+        sessions.forEach { store.markViewed(it.id, 0) }
+        updateState(vm) { it.copy(sessions = sessions, sessionReadStates = store.all(),
+            sessionStatuses = sessions.associate { s -> s.id to SessionStatus("idle") },
+            statusKnownIds = sessions.map { s -> s.id }.toSet(), statusStreamConnected = true,
+            appForeground = true) }
+        return vm
+    }
+
+    @Test fun `selecting blue parent confirms only that row and keeps both children unread`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD, vm.state.value.sessionPresentations["p"]?.indicator)
+        vm.selectSession("p")
+        vm.selectSession("x")
+        assertNull(vm.state.value.sessionPresentations["p"]?.indicator)
+        for (id in listOf("g", "c", "d")) assertEquals(
+            com.yage.opencode_client.ui.session.SessionIndicator.UNREAD, vm.state.value.sessionPresentations[id]?.indicator)
+        assertEquals(mapOf("c" to 100L, "d" to 200L), store.blueAcknowledgements("p"))
+        assertTrue(store.blueAcknowledgements("g").isEmpty())
+        assertTrue(store.blueAcknowledgements("c").isEmpty())
+        assertEquals(0L, store.lastViewedAt("c"))
+        assertEquals(0L, store.lastViewedAt("d"))
+        assertEquals(2, vm.state.value.sessionUnreadCounts["g"])
+    }
+
+    @Test fun `viewing child removes its source from all ancestors without reading sibling`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        vm.selectSession("c")
+        vm.selectSession("x")
+        for (id in listOf("p", "g")) assertEquals(mapOf("d" to 200L), vm.state.value.sessionBlueReminderSources[id])
+        assertNull(vm.state.value.sessionPresentations["c"]?.indicator)
+        assertEquals(0L, store.lastViewedAt("d"))
+    }
+
+    @Test fun `smaller sibling token and newly loaded child independently relight parent`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        vm.selectSession("p")
+        vm.selectSession("x")
+        updateState(vm) { it.copy(sessions = it.sessions.map { s ->
+            if (s.id == "c") s.copy(time = Session.TimeInfo(updated = 101)) else s }) }
+        assertEquals(mapOf("c" to 101L), vm.state.value.sessionBlueReminderSources["p"])
+        vm.selectSession("p")
+        vm.selectSession("x")
+        updateState(vm) { it.copy(sessions = it.sessions + Session("e", directory = "/test", parentId = "p",
+            time = Session.TimeInfo(updated = 50)), statusKnownIds = it.statusKnownIds + "e") }
+        assertEquals(mapOf("e" to 50L), vm.state.value.sessionBlueReminderSources["p"])
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD, vm.state.value.sessionPresentations["p"]?.indicator)
+    }
+
+    @Test fun `new child token during parent stay survives reselection background and exit`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        vm.selectSession("p")
+        updateState(vm) { it.copy(sessions = it.sessions.map { s ->
+            if (s.id == "c") s.copy(time = Session.TimeInfo(updated = 101)) else s }) }
+        assertNull(vm.state.value.sessionPresentations["p"]?.indicator)
+        vm.selectSession("p")
+        vm.setAppForeground(false)
+        vm.selectSession("x")
+        assertEquals(100L, store.blueAcknowledgements("p")["c"])
+        updateState(vm) { it.copy(appForeground = true, statusStreamConnected = true,
+            statusKnownIds = it.sessions.map { s -> s.id }.toSet()) }
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD, vm.state.value.sessionPresentations["p"]?.indicator)
+    }
+
+    @Test fun `pagination preserves acknowledgements while confirmed deletion cleans references`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        vm.selectSession("p")
+        vm.selectSession("x")
+        val child = vm.state.value.sessions.first { it.id == "c" }
+        updateState(vm) { it.copy(sessions = it.sessions.filterNot { s -> s.id == "c" }) }
+        assertEquals(100L, store.blueAcknowledgements("p")["c"])
+        updateState(vm) { it.copy(sessions = it.sessions + child) }
+        assertNull(vm.state.value.sessionPresentations["p"]?.indicator)
+        coEvery { repository.deleteSession("c") } returns Result.success(Unit)
+        vm.deleteSession("c")
+        advanceUntilIdle()
+        assertEquals(mapOf("d" to 200L), store.blueAcknowledgements("p"))
+        assertEquals(store.all(), vm.state.value.sessionReadStates)
+    }
+
+    @Test fun `parent own future update is not hidden by child acknowledgements`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        vm.selectSession("p")
+        vm.selectSession("x")
+        val future = System.currentTimeMillis() + 60_000
+        updateState(vm) { it.copy(sessions = it.sessions.map { s ->
+            if (s.id == "p") s.copy(time = Session.TimeInfo(updated = future)) else s }) }
+        assertEquals(mapOf("p" to future), vm.state.value.sessionBlueReminderSources["p"])
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD, vm.state.value.sessionPresentations["p"]?.indicator)
+    }
+
+    @Test fun `nonblue selection never acknowledges hidden child reminders`() = runTest {
+        for (kind in listOf("yellow", "red", "busy", "retry", "unknown", "stale", "disconnected", "archived")) {
+            val store = testSessionReadStateStore()
+            val vm = reminderTree(store)
+            if (kind == "red") store.markFailed("c", 300)
+            updateState(vm) { s -> when (kind) {
+                "yellow" -> s.copy(pendingPermissions = listOf(PermissionRequest("req", "c")))
+                "red" -> s.copy(sessionReadStates = store.all())
+                "busy", "retry", "unknown" -> s.copy(sessionStatuses = s.sessionStatuses + ("d" to SessionStatus(kind)))
+                "stale" -> s.copy(statusKnownIds = emptySet())
+                "disconnected" -> s.copy(statusStreamConnected = false)
+                else -> s.copy(sessions = s.sessions.map { if (it.id == "p") it.copy(time = Session.TimeInfo(archived = 1)) else it })
+            } }
+            assertTrue(kind, vm.state.value.sessionPresentations["p"]?.indicator != com.yage.opencode_client.ui.session.SessionIndicator.UNREAD)
+            vm.selectSession("p")
+            vm.selectSession("x")
+            assertTrue(kind, store.blueAcknowledgements("p").isEmpty())
+            assertEquals(0L, store.lastViewedAt("c"))
+            if (kind == "yellow") assertEquals(1, vm.state.value.pendingPermissions.size)
+            if (kind == "red") assertEquals(300L, store.failedAt("c"))
+        }
+    }
+
+    @Test fun `cold restore and host refresh preserve isolated parent acknowledgements`() = runTest {
+        val store = testSessionReadStateStore()
+        store.acknowledgeBlue("p", mapOf("c" to 100L))
+        every { settingsManager.currentSessionId } returns "p"
+        val vm = createViewModel(store)
+        assertEquals(mapOf("c" to 100L), vm.state.value.sessionReadStates["p"]?.blueAckBySource)
+        assertNull(store.lastViewedAt("p"))
+        store.selectHost("other-host")
+        store.acknowledgeBlue("p", mapOf("c" to 200L))
+        every { hostProfileStore.currentProfile() } returns HostProfile.defaultDirect("http://other.test").copy(id = "other-host")
+        invokePrivateNoArgs(vm, "refreshHostProfileState")
+        assertEquals(mapOf("c" to 200L), vm.state.value.sessionReadStates["p"]?.blueAckBySource)
+        store.selectHost("test-host")
+        assertEquals(mapOf("c" to 100L), store.blueAcknowledgements("p"))
+    }
+
+    private fun parentFirst(vm: MainViewModel): List<Session> =
+        vm.state.value.sessions.sortedBy { if (it.id == "p") 0 else 1 }
+
+    private fun assertAutomaticParentKeptReminders(vm: MainViewModel, store: SessionReadStateStore) {
+        assertEquals("p", vm.state.value.currentSessionId)
+        assertTrue(store.blueAcknowledgements("p").isEmpty())
+        assertNotNull(store.lastViewedAt("p")) // Keep the existing self-viewing behavior.
+        assertEquals(0L, store.lastViewedAt("c"))
+        assertEquals(0L, store.lastViewedAt("d"))
+        vm.selectSession("x")
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD,
+            vm.state.value.sessionPresentations["p"]?.indicator)
+        vm.selectSession("p")
+        assertEquals(mapOf("c" to 100L, "d" to 200L), store.blueAcknowledgements("p"))
+    }
+
+    @Test fun `refresh automatic selection never acknowledges blue parent for empty or missing current`() = runTest {
+        for (current in listOf(null, "missing")) {
+            val store = testSessionReadStateStore()
+            val vm = reminderTree(store)
+            val sessions = parentFirst(vm)
+            updateState(vm) { it.copy(currentSessionId = current) }
+            assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD,
+                vm.state.value.sessionPresentations["p"]?.indicator)
+            coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+            vm.loadSessions()
+            advanceUntilIdle()
+            assertAutomaticParentKeptReminders(vm, store)
+            advanceUntilIdle()
+        }
+    }
+
+    @Test fun `pagination automatic selection never acknowledges blue parent for empty or missing current`() = runTest {
+        for (current in listOf(null, "missing")) {
+            val store = testSessionReadStateStore()
+            val vm = reminderTree(store)
+            val sessions = parentFirst(vm)
+            updateState(vm) { it.copy(currentSessionId = current, hasMoreSessions = true) }
+            assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD,
+                vm.state.value.sessionPresentations["p"]?.indicator)
+            coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+            vm.loadMoreSessions()
+            advanceUntilIdle()
+            assertAutomaticParentKeptReminders(vm, store)
+            advanceUntilIdle()
+        }
+    }
+
+    @Test fun `deleting current automatically navigates to parent without acknowledging its children`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        updateState(vm) { it.copy(sessions = parentFirst(vm), currentSessionId = "x") }
+        coEvery { repository.deleteSession("x") } returns Result.success(Unit)
+        vm.deleteSession("x")
+        advanceUntilIdle()
+        assertAutomaticParentKeptReminders(vm, store)
+    }
+
+    @Test fun `unarchive automatic navigation does not acknowledge restored parent reminders`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        val sessions = vm.state.value.sessions
+        updateState(vm) { it.copy(currentSessionId = "x", sessions = it.sessions.map { s ->
+            if (s.id in setOf("p", "c", "d")) s.copy(time = s.time!!.copy(archived = 1)) else s }) }
+        coEvery { repository.updateSessionArchived(any(), any()) } answers {
+            Result.success(sessions.first { it.id == firstArg<String>() })
+        }
+        vm.restoreSession("p")
+        advanceUntilIdle()
+        assertAutomaticParentKeptReminders(vm, store)
+    }
+
+    @Test fun `cold restored parent refresh does not acknowledge child reminders`() = runTest {
+        every { settingsManager.currentSessionId } returns "p"
+        val store = testSessionReadStateStore()
+        val vm = reminderTree(store)
+        val sessions = parentFirst(vm)
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        vm.loadSessions()
+        advanceUntilIdle()
+        assertAutomaticParentKeptReminders(vm, store)
     }
 
     private fun updateState(viewModel: MainViewModel, transform: (AppState) -> AppState) {
@@ -191,6 +593,180 @@ class MainViewModelTest {
         val method = MainViewModel::class.java.getDeclaredMethod("handleSSEEvent", SSEEvent::class.java)
         method.isAccessible = true
         method.invoke(viewModel, event)
+    }
+
+    @Test fun `real permission HTTP failures retain pending and ancestor yellow`() = runTest {
+        val server = okhttp3.mockwebserver.MockWebServer()
+        server.start()
+        try {
+            val http = OpenCodeRepository().apply { configure(server.url("/").toString()) }
+            val vm = createViewModel()
+            val pending = PermissionRequest("request", "child")
+            updateState(vm) { it.copy(sessions = listOf(Session("parent", directory = "/test"),
+                Session("child", directory = "/test", parentId = "parent")), pendingPermissions = listOf(pending)) }
+            for (code in listOf(403, 500)) {
+                server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(code).setBody("private-body-marker"))
+                val done = CompletableDeferred<Unit>()
+                coEvery { repository.respondPermission("child", "request", PermissionResponse.ONCE) } coAnswers {
+                    http.respondPermission("child", "request", PermissionResponse.ONCE).also { done.complete(Unit) }
+                }
+                vm.respondPermission("child", "request", PermissionResponse.ONCE)
+                done.await(); runCurrent()
+                assertEquals(listOf(pending), vm.state.value.pendingPermissions)
+                for (id in listOf("parent", "child")) assertEquals(
+                    com.yage.opencode_client.ui.session.SessionIndicator.NEEDS_YOU,
+                    vm.state.value.sessionPresentations[id]!!.indicator)
+                assertFalse(vm.state.value.error.orEmpty().contains("private-body-marker"))
+            }
+        } finally { server.shutdown() }
+    }
+
+    @Test fun `unviewed child failure survives later success and only child viewing removes ancestor contribution`() = runTest {
+        val store = testSessionReadStateStore()
+        val vm = createViewModel(store)
+        updateState(vm) { it.copy(sessions = listOf(Session("parent", directory = "/test"),
+            Session("child", directory = "/test", parentId = "parent")), currentSessionId = "parent", statusStreamConnected = true) }
+        handleSse(vm, indicatorEvent("child"))
+        handleSse(vm, indicatorEvent("child", "idle"))
+        for (type in listOf("busy", "retry", "idle")) {
+            handleSse(vm, indicatorEvent("child", type))
+            for (id in listOf("parent", "child")) assertEquals(
+                com.yage.opencode_client.ui.session.SessionIndicator.FAILED, vm.state.value.sessionPresentations[id]!!.indicator)
+        }
+        vm.selectSession("child"); runCurrent()
+        assertTrue(vm.state.value.sessionFailureCounts.isEmpty())
+    }
+
+    @Test fun `fresh same-value SSE survives snapshot expiry and repeated failed GETs`() = runTest {
+        val vm = createViewModel()
+        val initialTime = 1_000L
+        updateState(vm) { it.copy(sessions = listOf(Session("child", directory = "/test"),
+            Session("snapshot-only", directory = "/test")), statusStreamConnected = true,
+            statusSnapshotKnown = true, statusConfirmedAt = initialTime,
+            statusKnownIds = setOf("child", "snapshot-only"),
+            sessionStatuses = mapOf("child" to SessionStatus("busy"), "snapshot-only" to SessionStatus("idle"))) }
+        coEvery { repository.getSessionStatusInDirectory(any()) } returns Result.failure(IllegalStateException("offline"))
+        val stateField = MainViewModel::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST") val flow = stateField.get(vm) as MutableStateFlow<AppState>
+        val job = com.yage.opencode_client.ui.launchSseWatchdog(backgroundScope, flow, { _, _ -> },
+            { invokePrivateNoArgs(vm, "loadSessionStatus") }, { initialTime + testScheduler.currentTime }, {},
+            { initialTime + testScheduler.currentTime })
+        runCurrent(); advanceTimeBy(64_000); runCurrent()
+        repeat(2) { handleSse(vm, indicatorEvent("child", "busy")) }
+        advanceTimeBy(7_000); runCurrent()
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.RUNNING, vm.state.value.sessionPresentations["child"]!!.indicator)
+        assertTrue(vm.state.value.sessionPresentations["snapshot-only"]!!.unknown)
+        advanceTimeBy(30_000); runCurrent()
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.RUNNING, vm.state.value.sessionPresentations["child"]!!.indicator)
+        job.cancel()
+    }
+
+    @Test fun `permission replied is exact and stale GET cannot resurrect resolved requests`() = runTest {
+        val vm = createViewModel()
+        val p = PermissionRequest("p", "child")
+        val sibling = PermissionRequest("p", "sibling")
+        updateState(vm) { it.copy(pendingPermissions = listOf(p, sibling)) }
+        val old = CompletableDeferred<Result<List<PermissionRequest>>>()
+        coEvery { repository.getPendingPermissions() } coAnswers { old.await() } andThen Result.success(listOf(sibling))
+        vm.loadPendingPermissions()
+        runCurrent()
+        handleSse(vm, SSEEvent(payload = SSEPayload(type = "permission.replied", properties = buildJsonObject {
+            put("sessionID", JsonPrimitive("child")); put("requestID", JsonPrimitive("p"))
+        })))
+        assertEquals(listOf(sibling), vm.state.value.pendingPermissions)
+        old.complete(Result.success(listOf(p, sibling)))
+        advanceUntilIdle()
+        assertEquals(listOf(sibling), vm.state.value.pendingPermissions)
+    }
+
+    @Test fun `question asked during GET survives obsolete snapshot`() = runTest {
+        val vm = createViewModel()
+        val old = CompletableDeferred<Result<List<QuestionRequest>>>()
+        val q = QuestionRequest(id = "new", sessionId = "child", questions = emptyList())
+        coEvery { repository.getPendingQuestions() } coAnswers { old.await() } andThen Result.success(listOf(q))
+        vm.loadPendingQuestions(); runCurrent()
+        handleSse(vm, SSEEvent(payload = SSEPayload(type = "question.asked", properties = buildJsonObject {
+            put("id", JsonPrimitive("new")); put("sessionID", JsonPrimitive("child")); put("questions", buildJsonArray {})
+        })))
+        old.complete(Result.success(emptyList())); advanceUntilIdle()
+        assertEquals(listOf(q), vm.state.value.pendingQuestions)
+    }
+
+    @Test fun `status snapshot preserves newer and same-value SSE and host generation`() = runTest {
+        val vm = createViewModel()
+        val old = CompletableDeferred<Result<Map<String, SessionStatus>>>()
+        coEvery { repository.getSessionStatus() } coAnswers { old.await() }
+        invokePrivateNoArgs(vm, "loadSessionStatus"); runCurrent()
+        repeat(2) {
+            handleSse(vm, SSEEvent(payload = SSEPayload(type = "session.status", properties = buildJsonObject {
+                put("sessionID", JsonPrimitive("child")); put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
+            })))
+        }
+        assertEquals(2L, vm.state.value.statusRevisions["child"])
+        old.complete(Result.success(emptyMap())); advanceUntilIdle()
+        assertTrue(vm.state.value.sessionStatuses["child"]!!.isBusy)
+        val other = CompletableDeferred<Result<Map<String, SessionStatus>>>()
+        coEvery { repository.getSessionStatus() } coAnswers { other.await() }
+        invokePrivateNoArgs(vm, "loadSessionStatus"); runCurrent()
+        updateState(vm) { it.copy(runtimeGeneration = it.runtimeGeneration + 1, sessionStatuses = emptyMap()) }
+        other.complete(Result.success(mapOf("old" to SessionStatus("busy")))); advanceUntilIdle()
+        assertTrue(vm.state.value.sessionStatuses.isEmpty())
+    }
+
+    @Test fun `reconnect refreshes global pending even without current session`() = runTest {
+        val vm = createViewModel()
+        val connected = slot<(() -> Unit)?>()
+        every { repository.connectSSE(captureNullable(connected), any()) } returns emptyFlow()
+        invokePrivateNoArgs(vm, "startSSE"); runCurrent()
+        connected.captured!!.invoke(); runCurrent()
+        coVerify { repository.getPendingPermissions() }
+        coVerify { repository.getPendingQuestions() }
+    }
+
+    @Test fun `failed status snapshot does not confirm null and scoped snapshot does`() = runTest {
+        val vm = createViewModel()
+        updateState(vm) { it.copy(sessions = listOf(Session("s", directory = "/project", time = Session.TimeInfo(updated = 100))), statusStreamConnected = true) }
+        coEvery { repository.getSessionStatusInDirectory("/project") } returns Result.failure(IllegalStateException("offline"))
+        invokePrivateNoArgs(vm, "loadSessionStatus"); advanceUntilIdle()
+        assertTrue(vm.state.value.sessionPresentations["s"]!!.unknown)
+        assertNull(vm.state.value.sessionPresentations["s"]!!.indicator)
+        coEvery { repository.getSessionStatusInDirectory("/project") } returns Result.success(emptyMap())
+        invokePrivateNoArgs(vm, "loadSessionStatus"); advanceUntilIdle()
+        assertFalse(vm.state.value.sessionPresentations["s"]!!.unknown)
+        assertEquals(com.yage.opencode_client.ui.session.SessionIndicator.UNREAD, vm.state.value.sessionPresentations["s"]!!.indicator)
+        updateState(vm) { it.copy(sessions = it.sessions + listOf(
+            Session("other", directory = "/other", time = Session.TimeInfo(updated = 100)),
+            Session("new", directory = "/project", time = Session.TimeInfo(updated = 100)))) }
+        assertTrue(vm.state.value.sessionPresentations["other"]!!.unknown)
+        assertTrue(vm.state.value.sessionPresentations["new"]!!.unknown)
+    }
+
+    @Test fun `old host pending callback and failed replies cannot remove current requests`() = runTest {
+        val vm = createViewModel()
+        val p = PermissionRequest("p", "s")
+        updateState(vm) { it.copy(pendingPermissions = listOf(p)) }
+        coEvery { repository.respondPermission(any(), any(), any()) } returns Result.failure(IllegalStateException("offline"))
+        vm.respondPermission("s", "p", PermissionResponse.ONCE); advanceUntilIdle()
+        assertEquals(listOf(p), vm.state.value.pendingPermissions)
+        val old = CompletableDeferred<Result<List<PermissionRequest>>>()
+        coEvery { repository.getPendingPermissions() } coAnswers { old.await() }
+        vm.loadPendingPermissions(); runCurrent()
+        updateState(vm) { it.copy(runtimeGeneration = it.runtimeGeneration + 1, pendingPermissions = emptyList()) }
+        old.complete(Result.success(listOf(p))); advanceUntilIdle()
+        assertTrue(vm.state.value.pendingPermissions.isEmpty())
+    }
+
+    @Test fun `healthy heartbeats still receive low frequency status confirmation without selection`() = runTest {
+        val state = MutableStateFlow(AppState())
+        var calls = 0
+        val job = com.yage.opencode_client.ui.launchSseWatchdog(backgroundScope, state,
+            { _, _ -> }, { calls++ }, { testScheduler.currentTime }, {}, { testScheduler.currentTime })
+        runCurrent(); advanceTimeBy(30_001); runCurrent()
+        assertEquals(1, calls)
+        state.value = state.value.copy(appForeground = false)
+        advanceTimeBy(30_000); runCurrent()
+        assertEquals(1, calls)
+        job.cancel()
     }
 
     private fun invokePrivateNoArgs(viewModel: MainViewModel, name: String) {
@@ -3605,7 +4181,7 @@ class MainViewModelTest {
     @Test
     fun `startSSE onConnected reconciles messages and status once`() = runTest {
         val captured = slot<() -> Unit>()
-        coEvery { repository.connectSSE(capture(captured)) } returns emptyFlow()
+        coEvery { repository.connectSSE(capture(captured), any()) } returns emptyFlow()
         val viewModel = createViewModel()
         updateState(viewModel) { it.copy(currentSessionId = "session-1") }
 
@@ -3622,7 +4198,7 @@ class MainViewModelTest {
     @Test
     fun `startSSE onConnected skips messages refresh while session is busy`() = runTest {
         val captured = slot<() -> Unit>()
-        coEvery { repository.connectSSE(capture(captured)) } returns emptyFlow()
+        coEvery { repository.connectSSE(capture(captured), any()) } returns emptyFlow()
         val viewModel = createViewModel()
         updateState(viewModel) {
             it.copy(

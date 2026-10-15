@@ -7,6 +7,7 @@ import com.yage.opencode_client.data.model.MessageWithParts
 import com.yage.opencode_client.data.model.Part
 import com.yage.opencode_client.data.model.ProviderModel
 import com.yage.opencode_client.data.model.ProvidersResponse
+import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import com.yage.opencode_client.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
@@ -149,18 +150,68 @@ internal fun launchLoadMoreSessions(
 internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    state: MutableStateFlow<AppState>
+    state: MutableStateFlow<AppState>,
+    onReconcileSessionFailure: (String, SessionStatus?, SessionStatus) -> Unit = { _, _, _ -> }
 ) {
+    val request = synchronized(state) {
+        if (state.value.statusRequestInFlight) return
+        val snapshot = state.value
+        state.update { it.copy(statusRequestInFlight = true) }
+        snapshot
+    }
+    val generation = request.runtimeGeneration
+    val epoch = request.statusEpoch
+    val revision = request.statusRevision
+    val directories = request.sessions.map { it.directory }.toSet()
     scope.launch {
-        repository.getSessionStatus()
+        try {
+            val result = if (directories.isEmpty()) repository.getSessionStatus() else runCatching {
+                buildMap<String, SessionStatus> {
+                    for (directory in directories) putAll(repository.getSessionStatusInDirectory(directory).getOrThrow())
+                }
+            }
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (state.value.runtimeGeneration != generation || state.value.statusEpoch != epoch) return@launch
+            result
             .onSuccess { statuses ->
+                val previous = state.value.sessionStatuses
+                val scopedIds = state.value.sessions.filter { it.directory in directories }.map { it.id }.toSet()
+                val reconciled = statuses.toMutableMap()
+                previous.forEach { (id, status) ->
+                    if (state.value.statusRevisions.getOrDefault(id, 0) > revision) {
+                        reconciled[id] = status
+                    } else if (id !in scopedIds) {
+                        reconciled[id] = status
+                    } else if (id !in statuses && (status.isBusy || status.isRetry)) {
+                        reconciled[id] = SessionStatus(type = "idle")
+                    }
+                }
+                reconciled.forEach { (id, status) ->
+                    if (state.value.statusRevisions.getOrDefault(id, 0) <= revision &&
+                        id in scopedIds) {
+                        onReconcileSessionFailure(id, previous[id], status)
+                    }
+                }
                 state.update { current ->
-                    current.copy(sessionStatuses = statuses)
+                    current.copy(sessionStatuses = reconciled, statusSnapshotKnown = true, statusSnapshotDirectories = directories,
+                        statusKnownIds = current.statusKnownIds + request.sessions.map { it.id },
+                        // A changed REST value is now snapshot-derived. An unchanged
+                        // value retains its independent same-connection SSE evidence.
+                        statusSseKnownIds = current.statusSseKnownIds.filterTo(mutableSetOf()) { id ->
+                            id !in scopedIds || current.statusRevisions.getOrDefault(id, 0) > revision ||
+                                previous[id] == reconciled[id] ||
+                                (previous[id]?.isIdle == true && reconciled[id] == null)
+                        },
+                        statusConfirmedAt = System.currentTimeMillis())
                 }
             }
             .onFailure { error ->
+                state.update { it.copy(statusSnapshotKnown = false, statusKnownIds = emptySet()) }
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
             }
+        } finally {
+            if (state.value.runtimeGeneration == generation && state.value.statusEpoch == epoch) state.update { it.copy(statusRequestInFlight = false) }
+        }
     }
 }
 
@@ -494,7 +545,8 @@ internal fun launchSetSessionArchived(
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
     sessionId: String,
-    archived: Boolean
+    archived: Boolean,
+    onRestored: () -> Unit = {}
 ) {
     scope.launch {
         val archivedValue = if (archived) System.currentTimeMillis() else -1L
@@ -513,6 +565,7 @@ internal fun launchSetSessionArchived(
                     return@launch
                 }
         }
+        if (!archived) onRestored()
     }
 }
 
@@ -530,7 +583,8 @@ internal fun launchDeleteSession(
     repository: OpenCodeRepository,
     state: MutableStateFlow<AppState>,
     sessionId: String,
-    onSelectSession: (String) -> Unit
+    onSelectSession: (String) -> Unit,
+    onDeleted: () -> Unit = {}
 ) {
     scope.launch {
         repository.deleteSession(sessionId)
@@ -545,6 +599,7 @@ internal fun launchDeleteSession(
                         state.update { it.copy(currentSessionId = null, messages = emptyList()) }
                     }
                 }
+                onDeleted()
             }
             .onFailure { error ->
                 state.update { it.copy(error = "Failed to delete session: ${errorMessageOrFallback(error, "unknown error")}") }

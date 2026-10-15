@@ -120,8 +120,10 @@ class MainActivity : AppCompatActivity() {
             DisposableEffect(lifecycleOwner, mainViewModel) {
                 val observer = LifecycleEventObserver { _, event ->
                     if (event == Lifecycle.Event.ON_STOP) {
+                        mainViewModel.setAppForeground(false)
                         mainViewModel.stopSpeechForBackground()
                     }
+                    if (event == Lifecycle.Event.ON_START) mainViewModel.setAppForeground(true)
                 }
                 lifecycleOwner.lifecycle.addObserver(observer)
                 onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -440,11 +442,14 @@ private fun TabletLayout(viewModel: MainViewModel) {
                     )
                 } else {
                     SessionList(
+                        presentations = state.sessionPresentations,
                         sessions = state.sessions,
                         currentSessionId = state.currentSessionId,
                         sessionStatuses = state.sessionStatuses,
                         attentionSessionIds = state.attentionSessionIds,
                         descendantBusyCounts = state.sessionDescendantBusyCounts,
+                        unreadCounts = state.sessionUnreadCounts,
+                        failureCounts = state.sessionFailureCounts,
                         hasMoreSessions = state.hasMoreSessions,
                         isLoadingMoreSessions = state.isLoadingMoreSessions,
                         isRefreshingSessions = state.isRefreshingSessions,

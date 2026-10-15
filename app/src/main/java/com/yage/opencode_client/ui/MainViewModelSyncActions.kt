@@ -2,6 +2,7 @@ package com.yage.opencode_client.ui
 
 import com.yage.opencode_client.data.model.Message
 import com.yage.opencode_client.data.model.SSEEvent
+import com.yage.opencode_client.data.model.SessionStatus
 import com.yage.opencode_client.data.model.TodoItem
 import com.yage.opencode_client.data.repository.OpenCodeRepository
 import kotlinx.coroutines.CoroutineScope
@@ -10,9 +11,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
+
+private val pendingEventJson = Json { ignoreUnknownKeys = true }
 
 internal fun launchSseCollection(
     scope: CoroutineScope,
@@ -21,15 +25,33 @@ internal fun launchSseCollection(
     onEvent: (SSEEvent) -> Unit,
     onConnected: (() -> Unit)? = null
 ): Job {
+    val generation = state.value.runtimeGeneration
+    val stream = state.value.streamGeneration
+    fun currentStream() = state.value.runtimeGeneration == generation && state.value.streamGeneration == stream
+    fun disconnected() {
+        if (currentStream()) state.update {
+            it.copy(pendingSessionErrorAt = emptyMap(), statusStreamConnected = false,
+                statusSnapshotKnown = false, statusKnownIds = emptySet(), statusSseKnownIds = emptySet(), statusEpoch = it.statusEpoch + 1,
+                statusRequestInFlight = false, permissionRevision = it.permissionRevision + 1, questionRevision = it.questionRevision + 1)
+        }
+    }
     return scope.launch {
-        repository.connectSSE(onConnected)
+        repository.connectSSE(
+            { scope.launch { if (currentStream()) onConnected?.invoke() } },
+            onDisconnected = { scope.launch { disconnected() } }
+        )
+            .onCompletion { disconnected() }
             .catch { error ->
-                state.update { it.copy(error = "SSE Error: ${error.message}") }
+                disconnected()
+                if (!currentStream()) return@catch
+                state.update { it.copy(error = "SSE Error: ${error.message}", pendingSessionErrorAt = emptyMap()) }
             }
             .collect { result ->
+                if (!currentStream()) return@collect
                 result.onSuccess { event -> onEvent(event) }
                     .onFailure { error ->
-                        state.update { it.copy(error = "SSE Error: ${error.message}") }
+                        disconnected()
+                        state.update { it.copy(error = "SSE Error: ${error.message}", pendingSessionErrorAt = emptyMap()) }
                     }
             }
     }
@@ -70,8 +92,18 @@ internal fun launchSseWatchdog(
     clock: () -> Long = { System.currentTimeMillis() }
 ): Job {
     return scope.launch {
+        var lastConfirmation = clock()
         while (true) {
             delay(MainViewModelTimings.watchdogCheckMs)
+            if (!state.value.appForeground) continue
+            val tick = clock()
+            if (state.value.statusConfirmedAt > 0 && tick - state.value.statusConfirmedAt > 60_000) {
+                state.update { it.copy(statusSnapshotKnown = false, statusKnownIds = emptySet()) }
+            }
+            if (tick - lastConfirmation >= 30_000) {
+                lastConfirmation = tick
+                onLoadSessionStatus()
+            }
             val last = lastFrameAtMs()
             if (last == 0L) continue
             val now = clock()
@@ -96,7 +128,8 @@ internal fun handleIncomingSseEvent(
     onLoadPendingPermissions: () -> Unit,
     onNonFatalIssue: (String) -> Unit,
     onRecordUserMessage: (String, String) -> Unit = { _, _ -> },
-    onRecordToolPart: (String, String) -> Unit = { _, _ -> }
+    onRecordToolPart: (String, String) -> Unit = { _, _ -> },
+    onReconcileSessionFailure: (String, SessionStatus?, SessionStatus) -> Unit = { _, _, _ -> }
 ) {
     when (event.payload.type) {
         "session.created" -> {
@@ -120,9 +153,17 @@ internal fun handleIncomingSseEvent(
         "session.status" -> {
             val statusEvent = parseSessionStatusEvent(event)
             if (statusEvent != null) {
+                onReconcileSessionFailure(
+                    statusEvent.sessionId,
+                    state.value.sessionStatuses[statusEvent.sessionId],
+                    statusEvent.status
+                )
                 state.update {
                     it.copy(
-                        sessionStatuses = it.sessionStatuses + (statusEvent.sessionId to statusEvent.status)
+                        sessionStatuses = it.sessionStatuses + (statusEvent.sessionId to statusEvent.status),
+                        statusRevision = it.statusRevision + 1,
+                        statusRevisions = it.statusRevisions + (statusEvent.sessionId to it.statusRevision + 1),
+                        statusSseKnownIds = it.statusSseKnownIds + statusEvent.sessionId
                     )
                 }
 
@@ -312,9 +353,22 @@ internal fun handleIncomingSseEvent(
             // handleSSEEvent before dispatch, so every frame counts.
         }
         "permission.asked" -> {
+            state.update { it.copy(permissionRevision = it.permissionRevision + 1) }
+            val request = runCatching {
+                pendingEventJson.decodeFromJsonElement<com.yage.opencode_client.data.model.PermissionRequest>(event.payload.properties!!)
+            }.getOrNull()
+            if (request != null) state.update { it.copy(pendingPermissions = it.pendingPermissions.filterNot { p -> p.id == request.id && p.sessionId == request.sessionId } + request) }
             onLoadPendingPermissions()
         }
+        "permission.replied" -> {
+            val id = event.payload.getString("requestID") ?: event.payload.getString("permissionID") ?: event.payload.getString("id")
+            val session = event.payload.getString("sessionID")
+            state.update { it.copy(permissionRevision = it.permissionRevision + 1) }
+            if (id != null && session != null) state.update { it.copy(pendingPermissions = it.pendingPermissions.filterNot { p -> p.id == id && p.sessionId == session }) }
+            else onLoadPendingPermissions()
+        }
         "question.asked" -> {
+            state.update { it.copy(questionRevision = it.questionRevision + 1) }
             val question = parseQuestionAskedEvent(event)
             if (question != null) {
                 state.update { currentState ->
@@ -330,6 +384,7 @@ internal fun handleIncomingSseEvent(
             }
         }
         "question.replied", "question.rejected" -> {
+            state.update { it.copy(questionRevision = it.questionRevision + 1) }
             val requestId = event.payload.getString("requestID") 
                 ?: event.payload.getString("id")
             if (requestId != null) {
@@ -352,6 +407,10 @@ internal fun handleIncomingSseEvent(
         }
         "session.error" -> {
             val sessionId = event.payload.getString("sessionID")
+            if (sessionId != null) {
+                val now = System.currentTimeMillis()
+                state.update { it.copy(pendingSessionErrorAt = it.pendingSessionErrorAt + (sessionId to now)) }
+            }
             if (sessionId != null && sessionId == state.value.currentSessionId) {
                 // prompt_async acknowledges with 204 before the turn runs, so a failure
                 // that happens before the user message is persisted only surfaces here.
